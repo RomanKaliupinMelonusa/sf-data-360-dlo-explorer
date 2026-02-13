@@ -885,8 +885,9 @@
       const out = await api(`/api/dlo/${encodeURIComponent(state.selectedDlo)}/related-objects`);
       el("relatedObjectsMeta").textContent =
         `Connect API: ${out.connectAvailable ? "✓ available" : "✗ unavailable (metadata-only mode)"}` +
-        (out.debug?.connectBaseResolved ? ` • Base: ${out.debug.connectBaseResolved}` : "") +
-        (out.debug?.connectTokenKind ? ` • Token: ${out.debug.connectTokenKind}` : "");
+        ` · DLO rels: ${(out.dloRelationships || []).length}` +
+        ` · DMO matches: ${(out.mappedDmos || []).length}` +
+        (out.debug?.connectBaseResolved ? ` · Base: ${out.debug.connectBaseResolved}` : "");
 
       renderRelatedObjects(out);
       relatedObjectsLoaded = true;
@@ -1004,12 +1005,20 @@
           relObjHtml = `<div class="lineage-subsection"><div class="muted">No relationships found for this DMO.</div></div>`;
         }
 
+        const discoveryLabel = d.discoveredVia === "name-heuristic" ? " (name match)"
+          : d.discoveredVia === "metadata-reference" ? " (metadata ref)" : "";
+        const discoveryBadge = d.discoveredVia
+          ? `<span class="badge badge-muted">via ${esc(d.discoveredVia)}</span>` : "";
+
         html += `
           <div class="lineage-section">
             <div class="lineage-section-header">
-              <strong>Mapped DMO: ${esc(d.dmoName)}</strong>
+              <strong>${d.discoveredVia ? "Related" : "Mapped"} DMO: ${esc(d.displayName || d.dmoName)}${discoveryLabel}</strong>
+              ${discoveryBadge}
               <span class="badge">${(d.relatedObjects || []).length} relationship${(d.relatedObjects || []).length !== 1 ? "s" : ""}</span>
               ${d.fieldMappings?.length ? `<span class="badge badge-muted">${d.fieldMappings.length} field mapping${d.fieldMappings.length !== 1 ? "s" : ""}</span>` : ""}
+              ${d.category ? `<span class="badge badge-muted">${esc(d.category)}</span>` : ""}
+              ${d.fieldCount ? `<span class="badge badge-muted">${d.fieldCount} fields</span>` : ""}
             </div>
             ${fieldMapHtml}
             ${relObjHtml}
@@ -1018,11 +1027,27 @@
     }
 
     if (!html) {
-      html = `<div class="muted" style="padding:12px;">No DMO mappings or relationships found for this DLO.
-        <br/><br/>This can happen if:<br/>
-        • The Connect API mapping endpoint is not available for your token/scope<br/>
-        • The DLO has no DMO mappings configured<br/>
-        • The DLO metadata has no relationships defined</div>`;
+      const checks = [
+        `Connect API DLO→DMO mappings: ${out.connectAvailable ? "checked — none found" : "unavailable (auto-discovery failed)"}`,
+        `DLO metadata relationships: ${(out.dloRelationships || []).length} found`,
+        `DMO metadata scan (name heuristic): ${(out.mappedDmos || []).length} matches`,
+        `Raw relationship entries in DLO metadata: ${out.debug?.rawDloRelationshipCount ?? "?"}`,
+      ];
+      html = `<div class="muted" style="padding:16px; line-height:1.7;">
+        <strong>No relationships found for this DLO.</strong>
+        <br/><br/>
+        <strong>Diagnostics:</strong><br/>
+        ${checks.map(c => `&nbsp;&nbsp;• ${c}`).join("<br/>")}
+        <br/><br/>
+        <strong>Common reasons:</strong><br/>
+        &nbsp;&nbsp;• SFMC engagement DLOs often have no metadata-level relationships<br/>
+        &nbsp;&nbsp;• DLO→DMO mappings are only visible via the Connect API<br/>
+        &nbsp;&nbsp;• The Connect API requires specific scopes or a custom base URL<br/>
+        <br/>
+        <strong>To enable full lineage:</strong><br/>
+        &nbsp;&nbsp;1. Set <code>DC_CONNECT_BASE_URL</code> env var to your Data Cloud Connect REST endpoint<br/>
+        &nbsp;&nbsp;2. Or try a standard (ssot__) DLO which often has metadata relationships
+      </div>`;
     }
 
     pane.innerHTML = html;
