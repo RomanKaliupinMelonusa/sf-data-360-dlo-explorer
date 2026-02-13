@@ -9,7 +9,7 @@
 
 import "dotenv/config";
 import express from "express";
-import session from "express-session";
+import cookieSession from "cookie-session";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import path from "path";
@@ -24,16 +24,13 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "dev-secret-change-me",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: IS_PROD,
-      // No maxAge — cookie expires when the browser is closed (session cookie)
-    },
+  cookieSession({
+    name: "session",
+    keys: [process.env.SESSION_SECRET || "dev-secret-change-me"],
+    httpOnly: true,
+    sameSite: "lax",
+    secure: IS_PROD,
+    // No maxAge — cookie expires when the browser is closed (session cookie)
   })
 );
 
@@ -106,7 +103,8 @@ app.get("/site/status", (req, res) => {
 });
 
 app.post("/site/logout", (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req.session = null;
+  res.json({ ok: true });
 });
 
 // Middleware: block everything else until site login is complete
@@ -307,7 +305,8 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 app.post("/auth/logout", (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req.session = null;
+  res.json({ ok: true });
 });
 
 // ---- App API ----
