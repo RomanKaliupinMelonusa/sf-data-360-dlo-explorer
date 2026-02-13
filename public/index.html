@@ -501,6 +501,7 @@
           <div class="tabs">
             <div class="tab" data-tab="fieldsTab">Fields</div>
             <div class="tab" data-tab="keysTab">Primary Keys</div>
+            <div class="tab" data-tab="relsTab">Related Objects</div>
             <div class="tab active" data-tab="dataTab">Data Explorer</div>
           </div>
 
@@ -509,6 +510,9 @@
           </div>
           <div id="keysTab" class="tab-panel">
             <div class="table-scroll" id="keysWrap"></div>
+          </div>
+          <div id="relsTab" class="tab-panel">
+            <div class="table-scroll" id="relsWrap"></div>
           </div>
           <div id="dataTab" class="tab-panel active">
             <div class="table-scroll" id="tableWrap"></div>
@@ -689,6 +693,47 @@
             </tr>
           </thead>
           <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    // ---- Related Objects ----
+    const rels = (state.entity?.relationships || []).slice();
+    if (!rels.length) {
+      el("relsWrap").innerHTML = `<div class="muted">No relationships found.</div>`;
+    } else {
+      const currentName = state.entity.name;
+      const rRows = rels.map((r, i) => {
+        const isOutgoing = (r.fromEntity || "").toLowerCase() === (currentName || "").toLowerCase();
+        const relatedEntity = isOutgoing ? r.toEntity : r.fromEntity;
+        const localField = isOutgoing ? r.fromEntityAttribute : r.toEntityAttribute;
+        const remoteField = isOutgoing ? r.toEntityAttribute : r.fromEntityAttribute;
+        const direction = isOutgoing ? "→ outgoing" : "← incoming";
+        return `
+          <tr>
+            <td class="num">${i + 1}</td>
+            <td style="font-weight:600">${esc(relatedEntity || "—")}</td>
+            <td>${esc(localField || "—")}</td>
+            <td>${esc(remoteField || "—")}</td>
+            <td>${esc(r.cardinality || "—")}</td>
+            <td>${esc(direction)}</td>
+          </tr>
+        `;
+      }).join("");
+
+      el("relsWrap").innerHTML = `
+        <table class="schema-table">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Related Object</th>
+              <th>Local Field</th>
+              <th>Remote Field</th>
+              <th>Cardinality</th>
+              <th>Direction</th>
+            </tr>
+          </thead>
+          <tbody>${rRows}</tbody>
         </table>
       `;
     }
