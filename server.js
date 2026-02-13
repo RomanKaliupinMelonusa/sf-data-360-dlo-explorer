@@ -253,6 +253,109 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// ---- Connect API helpers (for Related Objects / lineage) ----
+
+function pickList(json) {
+  if (!json) return [];
+  return json.data || json.items || json.results || json.records || json.metadata || [];
+}
+
+function safeStr(v) {
+  if (v == null) return "";
+  return String(v);
+}
+
+async function sfGetLatestApiVersion(sfInstanceUrl, sfAccessToken) {
+  const resp = await fetch(`${normalizeBaseUrl(sfInstanceUrl)}/services/data`, {
+    headers: { Authorization: `Bearer ${sfAccessToken}` },
+  });
+  if (!resp.ok) throw new Error(`Failed to list SF API versions: ${resp.status} ${await resp.text()}`);
+  const versions = await resp.json();
+  const best = (versions || [])
+    .map((v) => safeStr(v.version))
+    .filter(Boolean)
+    .sort((a, b) => parseFloat(b) - parseFloat(a))[0];
+  return best || "60.0";
+}
+
+async function tryFetchJson(url, token) {
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await resp.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  return { resp, text, json };
+}
+
+/**
+ * Resolve Data 360 Connect REST API base URL.
+ * Uses DC_CONNECT_BASE_URL if set, otherwise probes common URL patterns.
+ */
+async function resolveConnectApiBase(req) {
+  await ensureTokens(req);
+  const auth = req.session.auth;
+
+  if (auth.dc_connect_base_url && auth.dc_connect_token_kind) {
+    return { baseUrl: auth.dc_connect_base_url, tokenKind: auth.dc_connect_token_kind };
+  }
+
+  if (process.env.DC_CONNECT_BASE_URL) {
+    const baseUrl = normalizeBaseUrl(process.env.DC_CONNECT_BASE_URL);
+    const tokenKind = (process.env.DC_CONNECT_TOKEN || "dc").toLowerCase() === "sf" ? "sf" : "dc";
+    auth.dc_connect_base_url = baseUrl;
+    auth.dc_connect_token_kind = tokenKind;
+    req.session.auth = auth;
+    return { baseUrl, tokenKind };
+  }
+
+  const sfVersion = await sfGetLatestApiVersion(auth.sf_instance_url, auth.sf_access_token);
+  const dc = normalizeBaseUrl(auth.dc_instance_url);
+  const sf = normalizeBaseUrl(auth.sf_instance_url);
+
+  const candidates = [
+    { base: `${dc}/api/v1`, tokenKind: "dc" },
+    { base: `${dc}/api/v1/connect`, tokenKind: "dc" },
+    { base: `${dc}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "dc" },
+    { base: `${dc}/services/data/v${sfVersion}/connect/data360`, tokenKind: "dc" },
+    { base: `${sf}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "sf" },
+    { base: `${sf}/services/data/v${sfVersion}/connect/data360`, tokenKind: "sf" },
+  ];
+
+  const mappingPath = process.env.DC_CONNECT_MAPPING_COLLECTION_PATH || "dataModelObjectMappings";
+
+  for (const c of candidates) {
+    const token = c.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
+    const probeUrl = `${c.base}/${mappingPath}`;
+    try {
+      const { resp } = await tryFetchJson(probeUrl, token);
+      if (resp.status === 200 || resp.status === 400) {
+        auth.dc_connect_base_url = c.base;
+        auth.dc_connect_token_kind = c.tokenKind;
+        req.session.auth = auth;
+        return { baseUrl: c.base, tokenKind: c.tokenKind };
+      }
+    } catch {}
+  }
+
+  throw new Error(
+    "Unable to auto-discover Data 360 Connect API base URL. Set DC_CONNECT_BASE_URL + DC_CONNECT_TOKEN env vars."
+  );
+}
+
+async function connectApiGet(req, relPath, searchParams = {}) {
+  const { baseUrl, tokenKind } = await resolveConnectApiBase(req);
+  const auth = req.session.auth;
+  const token = tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
+  const url = new URL(`${baseUrl.replace(/\/+$/g, "")}/${relPath.replace(/^\/+/g, "")}`);
+  for (const [k, v] of Object.entries(searchParams)) {
+    if (v !== undefined && v !== null && `${v}`.length) url.searchParams.set(k, String(v));
+  }
+  const { resp, text, json } = await tryFetchJson(url.toString(), token);
+  if (!resp.ok) throw new Error(`Connect API GET failed: ${resp.status} ${text}`);
+  return json;
+}
+
 // ---- Auth routes ----
 
 app.get("/auth/login", (req, res) => {
@@ -473,6 +576,199 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
     res.json({ sql: finalSql, result: json });
   } catch (e) {
     res.status(500).json({ error: String(e) });
+  }
+});
+
+/**
+ * Related Objects (Lineage) for a DLO:
+ * - Find DLO → DMO mappings via Connect API
+ * - For each mapped DMO, pull metadata relationships
+ * - Backfill join fields from fieldSourceTargetRelationships if needed
+ */
+app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
+  try {
+    await ensureTokens(req);
+    const auth = req.session.auth;
+    const dloName = req.params.name;
+
+    const mappingCollectionPath = process.env.DC_CONNECT_MAPPING_COLLECTION_PATH || "dataModelObjectMappings";
+    const relCollectionPath = process.env.DC_CONNECT_FIELD_REL_COLLECTION_PATH || "fieldSourceTargetRelationships";
+
+    // 1) Get all DLO→DMO mappings
+    let mappings = [];
+    let connectAvailable = true;
+    try {
+      const mappingsJson = await connectApiGet(req, mappingCollectionPath);
+      mappings = pickList(mappingsJson);
+    } catch (e) {
+      // Connect API may not be available — fall back to metadata-only mode
+      connectAvailable = false;
+    }
+
+    // Heuristic field extractors (payload shapes vary by org)
+    const getMappingId = (m) => m?.id || m?.name || m?.mappingId || m?.developerName || "";
+    const getSourceDlo = (m) =>
+      m?.sourceDataLakeObjectName || m?.sourceDloName || m?.dataLakeObjectName ||
+      m?.sourceObjectName || m?.source?.name || m?.sourceEntityName || "";
+    const getTargetDmo = (m) =>
+      m?.targetDataModelObjectName || m?.targetDmoName || m?.dataModelObjectName ||
+      m?.targetObjectName || m?.target?.name || m?.targetEntityName || "";
+
+    const matched = mappings.filter((m) =>
+      safeStr(getSourceDlo(m)).toLowerCase() === dloName.toLowerCase()
+    );
+
+    // Field relationship collection (lazy-loaded)
+    let fieldRels = null;
+    async function ensureFieldRelsLoaded() {
+      if (fieldRels) return;
+      try {
+        const fieldRelJson = await connectApiGet(req, relCollectionPath);
+        fieldRels = pickList(fieldRelJson);
+      } catch {
+        fieldRels = [];
+      }
+    }
+
+    const relSourceDmo = (r) => r?.sourceDataModelObjectName || r?.sourceDmoName || r?.sourceObjectName || r?.source?.name || "";
+    const relTargetDmo = (r) => r?.targetDataModelObjectName || r?.targetDmoName || r?.targetObjectName || r?.target?.name || "";
+    const relSourceField = (r) => r?.sourceFieldName || r?.sourceField || r?.source?.fieldName || "";
+    const relTargetField = (r) => r?.targetFieldName || r?.targetField || r?.target?.fieldName || "";
+
+    // 2) For each mapping, collect DMO relationships
+    const out = [];
+
+    // Helper to fetch DMO metadata relationships
+    async function fetchDmoRelationships(dmoName) {
+      const metaUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
+      metaUrl.searchParams.set("entityType", "DataModelObject");
+      metaUrl.searchParams.set("entityName", dmoName);
+      const metaResp = await fetch(metaUrl, { headers: { Authorization: `Bearer ${auth.dc_access_token}` } });
+      if (!metaResp.ok) return null;
+      const metaJson = await metaResp.json();
+      return (metaJson.metadata || [])[0] || null;
+    }
+
+    function normalizeRelationships(metaRels, dmoName) {
+      return (metaRels || []).map((r) => {
+        const fromEntity = r?.fromEntity || "";
+        const toEntity = r?.toEntity || "";
+        const isOutgoing = fromEntity.toLowerCase() === dmoName.toLowerCase();
+        const relatedName = isOutgoing ? toEntity : fromEntity;
+
+        const metaJoinPairs = [];
+        if (r?.fromEntityAttribute && r?.toEntityAttribute) {
+          metaJoinPairs.push({
+            sourceField: r.fromEntityAttribute,
+            targetField: r.toEntityAttribute,
+          });
+        } else {
+          const srcFields = r?.sourceFields || r?.sourceFieldNames || (r?.sourceField ? [r.sourceField] : []);
+          const tgtFields = r?.targetFields || r?.targetFieldNames || (r?.targetField ? [r.targetField] : []);
+          const n = Math.min(srcFields.length, tgtFields.length);
+          for (let i = 0; i < n; i++) {
+            metaJoinPairs.push({ sourceField: srcFields[i], targetField: tgtFields[i] });
+          }
+        }
+
+        return {
+          relatedDmoName: relatedName,
+          relationshipName: r?.name || r?.relationshipName || r?.developerName || "",
+          type: r?.type || r?.relationshipType || r?.cardinality || "",
+          direction: isOutgoing ? "outgoing" : "incoming",
+          join: metaJoinPairs,
+          raw: r,
+        };
+      });
+    }
+
+    if (matched.length > 0) {
+      // We have Connect API mappings
+      for (const m of matched) {
+        const mappingId = getMappingId(m);
+        const dmoName = getTargetDmo(m);
+        if (!dmoName) continue;
+
+        // Fetch mapping detail (best effort)
+        let fieldMappings = [];
+        if (mappingId) {
+          try {
+            const detail = await connectApiGet(req, `${mappingCollectionPath}/${encodeURIComponent(mappingId)}`);
+            const fm = detail?.fieldMappings || detail?.fieldMapping || detail?.mappings || detail?.fields || [];
+            fieldMappings = Array.isArray(fm) ? fm : [];
+          } catch {}
+        }
+
+        // Fetch DMO metadata
+        const entity = await fetchDmoRelationships(dmoName);
+        const relatedObjects = normalizeRelationships(entity?.relationships, dmoName);
+
+        // Backfill join fields from fieldSourceTargetRelationships
+        const needsBackfill = relatedObjects.some((x) => !x.join.length);
+        if (needsBackfill) {
+          await ensureFieldRelsLoaded();
+          const joinMap = new Map();
+          for (const r of fieldRels) {
+            const s = safeStr(relSourceDmo(r));
+            const t = safeStr(relTargetDmo(r));
+            if (!s || !t) continue;
+            const key = `${s}::${t}`;
+            const pair = { sourceField: relSourceField(r), targetField: relTargetField(r) };
+            if (!pair.sourceField || !pair.targetField) continue;
+            if (!joinMap.has(key)) joinMap.set(key, []);
+            joinMap.get(key).push(pair);
+          }
+          for (const ro of relatedObjects) {
+            if (ro.join.length) continue;
+            ro.join = joinMap.get(`${dmoName}::${ro.relatedDmoName}`) ||
+                      joinMap.get(`${ro.relatedDmoName}::${dmoName}`) || [];
+          }
+        }
+
+        out.push({ dmoName, mappingSummary: m, fieldMappings, relatedObjects });
+      }
+    } else {
+      // No Connect API mappings found — try metadata-only approach:
+      // Look up all DMOs and find ones that have relationships referencing this DLO
+      // Also check this DLO's own relationships from metadata
+    }
+
+    // 3) Always include DLO's own metadata relationships as a fallback/supplement
+    const dloMetaUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
+    dloMetaUrl.searchParams.set("entityType", "DataLakeObject");
+    dloMetaUrl.searchParams.set("entityName", dloName);
+    const dloMetaResp = await fetch(dloMetaUrl, { headers: { Authorization: `Bearer ${auth.dc_access_token}` } });
+    let dloRelationships = [];
+    if (dloMetaResp.ok) {
+      const dloMetaJson = await dloMetaResp.json();
+      const dloEntity = (dloMetaJson.metadata || [])[0];
+      if (dloEntity?.relationships?.length) {
+        dloRelationships = normalizeRelationships(dloEntity.relationships, dloName);
+      }
+    }
+
+    res.json({
+      dlo: dloName,
+      mappedDmos: out,
+      dloRelationships,
+      connectAvailable,
+      debug: {
+        connectBaseResolved: req.session.auth.dc_connect_base_url || null,
+        connectTokenKind: req.session.auth.dc_connect_token_kind || null,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Debug: check Connect API base URL resolution
+app.get("/api/debug/connect", requireAuth, async (req, res) => {
+  try {
+    const resolved = await resolveConnectApiBase(req);
+    res.json({ ok: true, ...resolved });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
