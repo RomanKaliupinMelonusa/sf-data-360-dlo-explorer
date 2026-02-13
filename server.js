@@ -7,6 +7,7 @@
  * - Preview rows via POST /api/v1/query (Query V2)
  */
 
+import "dotenv/config";
 import express from "express";
 import session from "express-session";
 import path from "path";
@@ -31,7 +32,7 @@ const __dirname = path.dirname(__filename);
 
 app.use(express.static(path.join(__dirname, "public")));
 
-const SF_LOGIN_URL = process.env.SF_LOGIN_URL || "https://login.salesforce.com";
+const SF_LOGIN_URL = normalizeBaseUrl(process.env.SF_LOGIN_URL || "https://login.salesforce.com");
 const CLIENT_ID = process.env.SF_CLIENT_ID;
 const CLIENT_SECRET = process.env.SF_CLIENT_SECRET;
 const REDIRECT_URI = process.env.SF_REDIRECT_URI || "http://localhost:3001/auth/callback";
@@ -43,18 +44,32 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
   console.warn("Missing SF_CLIENT_ID / SF_CLIENT_SECRET in environment.");
 }
 
+function normalizeBaseUrl(u) {
+  if (!u) return "";
+  let s = String(u).trim().replace(/\/+$/g, "");
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  return s;
+}
+
 function nowMs() {
   return Date.now();
 }
 
-async function sfTokenFromCode(code) {
+async function sfTokenFromCode(code, verifier) {
+  const codeVerifier = (verifier || "").toString();
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: CLIENT_ID,
     client_secret: CLIENT_SECRET,
     redirect_uri: REDIRECT_URI,
     code,
+    code_verifier: codeVerifier,
   });
+
+  const redacted = new URLSearchParams(body);
+  if (redacted.has("client_secret")) redacted.set("client_secret", "[redacted]");
+  console.log(`TOKEN URL: ${SF_LOGIN_URL}/services/oauth2/token`);
+  console.log(`TOKEN BODY: ${redacted.toString()}`);
 
   const resp = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
     method: "POST",
@@ -102,6 +117,10 @@ async function exchangeToDataCloudToken(sfInstanceUrl, sfAccessToken) {
     subject_token_type: "urn:ietf:params:oauth:token-type:access_token",
   });
 
+  if (process.env.SF_DATASPACE) {
+    body.set("dataspace", process.env.SF_DATASPACE);
+  }
+
   const resp = await fetch(`${sfInstanceUrl}/services/a360/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -122,14 +141,20 @@ async function ensureTokens(req) {
   if (ageMs > 50 * 60 * 1000 && auth.refresh_token) {
     const refreshed = await sfTokenFromRefresh(auth.refresh_token);
     auth.sf_access_token = refreshed.access_token;
-    auth.sf_instance_url = refreshed.instance_url || auth.sf_instance_url;
+    auth.sf_instance_url = normalizeBaseUrl(refreshed.instance_url || auth.sf_instance_url);
     auth.sf_obtained_at_ms = nowMs();
   }
 
   if (!auth.dc_access_token || nowMs() > (auth.dc_expires_at_ms || 0) - 30_000) {
     const dc = await exchangeToDataCloudToken(auth.sf_instance_url, auth.sf_access_token);
+
+    const dcUrl = normalizeBaseUrl(dc.instance_url);
+    if (!dcUrl) {
+      throw new Error(`Data Cloud token response missing instance_url. Raw response: ${JSON.stringify(dc)}`);
+    }
+
     auth.dc_access_token = dc.access_token;
-    auth.dc_instance_url = dc.instance_url;
+    auth.dc_instance_url = dcUrl;
     auth.dc_expires_at_ms = nowMs() + (dc.expires_in || 3600) * 1000;
   }
 
@@ -147,12 +172,22 @@ app.get("/auth/login", (req, res) => {
   const state = crypto.randomUUID();
   req.session.oauth_state = state;
 
+  const verifier = crypto.randomBytes(32).toString("base64url");
+  const challenge = crypto
+    .createHash("sha256")
+    .update(verifier)
+    .digest("base64url");
+
+  req.session.pkce_verifier = verifier;
+
   const params = new URLSearchParams({
     response_type: "code",
     client_id: CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     scope: SCOPES,
     state,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
   });
 
   res.redirect(`${SF_LOGIN_URL}/services/oauth2/authorize?${params.toString()}`);
@@ -164,7 +199,7 @@ app.get("/auth/callback", async (req, res) => {
     if (!code) return res.status(400).send("Missing code");
     if (!state || state !== req.session.oauth_state) return res.status(400).send("State mismatch");
 
-    const tok = await sfTokenFromCode(code);
+    const tok = await sfTokenFromCode(code, req.session.pkce_verifier);
 
     req.session.auth = {
       sf_access_token: tok.access_token,
@@ -273,7 +308,7 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
     await ensureTokens(req);
     const { dc_instance_url, dc_access_token } = req.session.auth;
 
-    const { fields, limit, offset, orderby, where } = req.body;
+    const { fields, limit, offset, orderby, where, sql } = req.body;
 
     const lim = Math.max(1, Math.min(Number(limit || 100), 5000));
     const off = Math.max(0, Number(offset || 0));
@@ -305,7 +340,8 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
         ? "*"
         : selected.map((f) => `"${f.replaceAll('"', '""')}"`).join(", ");
 
-    const sql = `SELECT ${selectClause} FROM "${dloName.replaceAll('"', '""')}"${whereClause}`;
+    const builtSql = `SELECT ${selectClause} FROM "${dloName.replaceAll('"', '""')}"${whereClause}`;
+    const finalSql = typeof sql === "string" && sql.trim() ? sql.trim() : builtSql;
 
     const url = new URL(`${dc_instance_url}/api/v1/query`);
     url.searchParams.set("limit", String(lim));
@@ -318,13 +354,13 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
         Authorization: `Bearer ${dc_access_token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ sql }),
+      body: JSON.stringify({ sql: finalSql }),
     });
 
     if (!resp.ok) throw new Error(`Query API failed: ${resp.status} ${await resp.text()}`);
     const json = await resp.json();
 
-    res.json({ sql, result: json });
+    res.json({ sql: finalSql, result: json });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }

@@ -18,6 +18,17 @@
     .pill { font-size: 12px; padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; }
     .grid { display:grid; grid-template-columns: 340px 1fr; gap: 12px; align-items:start; }
     .panel { border: 1px solid #eee; border-radius: 12px; padding: 10px; }
+    .panel-header { display:flex; gap:16px; align-items:center; border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:8px; }
+    .meta-row { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; font-size:12px; color:#666; }
+    .meta-row strong { display:block; color:#222; font-weight:600; }
+    .tabs { display:flex; gap:16px; border-bottom:1px solid #e5e5e5; margin-top:8px; }
+    .tab { padding:8px 2px; cursor:pointer; color:#666; font-weight:600; border-bottom:2px solid transparent; }
+    .tab.active { color:#111; border-bottom-color:#2f6fed; }
+    .tab-panel { display:none; }
+    .tab-panel.active { display:block; }
+    .table-scroll { margin-top:8px; overflow:auto; max-height: 75vh; }
+    .schema-table th { background:#fafafa; }
+    .num { width:40px; color:#777; text-align:right; padding-right:10px; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #eee; text-align:left; padding: 8px; font-size: 13px; }
     th { position: sticky; top: 0; background: white; cursor:pointer; }
@@ -71,6 +82,15 @@
             <input id="where" placeholder='e.g. "Status__c" = ''Active''' style="width:100%; margin-top:6px" />
           </div>
 
+          <div style="margin-top:12px;">
+            <label style="display:flex; gap:8px; align-items:center;">
+              <input type="checkbox" id="useCustomSql" />
+              <span>Use custom SQL</span>
+            </label>
+            <textarea id="customSql" rows="5" style="width:100%; margin-top:6px; display:none;"></textarea>
+            <div class="muted" style="margin-top:4px;">When enabled, field selection/WHERE are ignored.</div>
+          </div>
+
           <div class="row" style="margin-top:10px;">
             <button id="runBtn">Run preview</button>
             <button id="copySqlBtn" disabled>Copy SQL</button>
@@ -81,8 +101,38 @@
         </div>
 
         <div class="panel">
-          <strong>Preview</strong>
-          <div id="tableWrap" style="margin-top:8px; overflow:auto; max-height: 75vh;"></div>
+          <div class="panel-header">
+            <div class="meta-row" style="width:100%">
+              <div>
+                <span>Label</span>
+                <strong id="metaLabel">—</strong>
+              </div>
+              <div>
+                <span>API Name</span>
+                <strong id="metaApi">—</strong>
+              </div>
+              <div>
+                <span>Category</span>
+                <strong id="metaCategory">—</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabs">
+            <div class="tab active" data-tab="fieldsTab">Fields</div>
+            <div class="tab" data-tab="keysTab">Primary Keys</div>
+            <div class="tab" data-tab="dataTab">Data Explorer</div>
+          </div>
+
+          <div id="fieldsTab" class="tab-panel active">
+            <div class="table-scroll" id="fieldsWrap"></div>
+          </div>
+          <div id="keysTab" class="tab-panel">
+            <div class="table-scroll" id="keysWrap"></div>
+          </div>
+          <div id="dataTab" class="tab-panel">
+            <div class="table-scroll" id="tableWrap"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -157,6 +207,71 @@
     el("selectedDloPill").textContent = state.selectedDlo ? `Selected: ${state.selectedDlo}` : "No DLO selected";
   }
 
+  function setMetaHeader(entity) {
+    el("metaLabel").textContent = entity?.displayName || "—";
+    el("metaApi").textContent = entity?.name || "—";
+    el("metaCategory").textContent = entity?.category || "—";
+  }
+
+  function renderSchema() {
+    const fields = (state.entity?.fields || []).slice();
+    const keys = (state.entity?.primaryKeys || []).slice();
+
+    if (!fields.length) {
+      el("fieldsWrap").innerHTML = `<div class="muted">No fields found.</div>`;
+    } else {
+      const rows = fields.map((f, i) => `
+        <tr>
+          <td class="num">${i + 1}</td>
+          <td>${f.displayName || f.name || ""}</td>
+          <td>${f.name || ""}</td>
+          <td>${f.type || ""}</td>
+        </tr>
+      `).join("");
+
+      el("fieldsWrap").innerHTML = `
+        <table class="schema-table">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Label</th>
+              <th>API Name</th>
+              <th>Data Type</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    if (!keys.length) {
+      el("keysWrap").innerHTML = `<div class="muted">No primary keys found.</div>`;
+    } else {
+      const rows = keys.map((k, i) => `
+        <tr>
+          <td class="num">${i + 1}</td>
+          <td>${k.displayName || k.name || ""}</td>
+          <td>${k.name || ""}</td>
+          <td>${k.indexOrder ?? ""}</td>
+        </tr>
+      `).join("");
+
+      el("keysWrap").innerHTML = `
+        <table class="schema-table">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Label</th>
+              <th>API Name</th>
+              <th>Index Order</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+  }
+
   async function selectDlo(name) {
     state.selectedDlo = name;
     setSelectedDloPill();
@@ -168,47 +283,72 @@
     state.fields = (meta.entity.fields || []).slice().sort((a,b) => a.name.localeCompare(b.name));
     state.selectedFields = new Set(state.fields.map(f => f.name));
     state.sort = { field: "", dir: "ASC" };
+    el("customSql").value = `SELECT * FROM "${name}"`;
+    setMetaHeader(meta.entity);
+    renderSchema();
     renderFields();
     setStatus(`Ready (${name})`);
   }
 
   function buildOrderBy() {
-    if (!state.sort.field) return "";
-    return `${state.sort.field} ${state.sort.dir}`;
+    const col = state.sort.field || (state.selectedFields.size ? Array.from(state.selectedFields)[0] : "");
+    if (!col) return "";
+    return `${col} ${state.sort.dir || "ASC"}`;
   }
 
   async function runPreview() {
-    if (!state.selectedDlo) return alert("Select a DLO first.");
-    const limit = Number(el("limit").value || 100);
-    const offset = Number(el("offset").value || 0);
-    const where = el("where").value || "";
+    try {
+      if (!state.selectedDlo) return alert("Select a DLO first.");
+      const limit = Number(el("limit").value || 100);
+      const offset = Number(el("offset").value || 0);
+      const where = el("where").value || "";
 
-    const fields = Array.from(state.selectedFields);
-    if (fields.length === 0) return alert("Select at least 1 field (or click All).");
+      const useCustomSql = el("useCustomSql").checked;
+      const customSql = el("customSql").value || "";
+      const fields = Array.from(state.selectedFields);
+      if (!useCustomSql && fields.length === 0) {
+        return alert("Select at least 1 field (or click All).");
+      }
 
-    setStatus("Querying…");
-    const payload = { fields, limit, offset, orderby: buildOrderBy(), where };
+      setStatus("Querying…");
+      const orderby = offset > 0 ? buildOrderBy() : buildOrderBy();
+      if (offset > 0 && !orderby) {
+        return alert("Offset requires order by. Select a column or choose at least one field.");
+      }
 
-    const out = await api(`/api/dlo/${encodeURIComponent(state.selectedDlo)}/preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+      const payload = {
+        fields,
+        limit,
+        offset,
+        orderby,
+        where,
+        sql: useCustomSql ? customSql : ""
+      };
 
-    state.lastSql = out.sql;
-    el("sqlText").textContent = out.sql;
-    el("copySqlBtn").disabled = false;
+      const out = await api(`/api/dlo/${encodeURIComponent(state.selectedDlo)}/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
 
-    const result = out.result || {};
-    const rows = result.data || [];
-    state.lastRows = rows;
-    el("csvBtn").disabled = rows.length === 0;
+      state.lastSql = out.sql;
+      el("sqlText").textContent = out.sql;
+      el("copySqlBtn").disabled = false;
 
-    el("queryMeta").textContent =
-      `rowCount=${result.rowCount ?? "?"} • done=${result.done ?? "?"} • queryId=${result.queryId ?? "?"}`;
+      const result = out.result || {};
+      const rows = result.data || [];
+      state.lastRows = rows;
+      el("csvBtn").disabled = rows.length === 0;
 
-    renderTable(rows);
-    setStatus("Ready");
+      el("queryMeta").textContent =
+        `rowCount=${result.rowCount ?? "?"} • done=${result.done ?? "?"} • queryId=${result.queryId ?? "?"}`;
+
+      renderTable(rows);
+      setStatus("Ready");
+    } catch (e) {
+      setStatus("Error");
+      alert(e);
+    }
   }
 
   function renderTable(rows) {
@@ -287,6 +427,20 @@
   el("allFieldsBtn").addEventListener("click", () => { state.fields.forEach(f => state.selectedFields.add(f.name)); renderFields(); });
   el("noFieldsBtn").addEventListener("click", () => { state.selectedFields.clear(); renderFields(); });
   el("runBtn").addEventListener("click", runPreview);
+  el("useCustomSql").addEventListener("change", () => {
+    const checked = el("useCustomSql").checked;
+    el("customSql").style.display = checked ? "" : "none";
+  });
+
+  document.querySelectorAll(".tab").forEach(t => {
+    t.addEventListener("click", () => {
+      const id = t.dataset.tab;
+      document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+      document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+      t.classList.add("active");
+      el(id).classList.add("active");
+    });
+  });
 
   el("prevBtn").addEventListener("click", () => {
     const limit = Number(el("limit").value || 100);
