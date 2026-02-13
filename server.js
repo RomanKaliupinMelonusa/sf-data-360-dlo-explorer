@@ -32,7 +32,7 @@ app.use(
       httpOnly: true,
       sameSite: "lax",
       secure: IS_PROD,
-      maxAge: 2 * 60 * 60 * 1000, // 2 hours
+      // No maxAge — cookie expires when the browser is closed (session cookie)
     },
   })
 );
@@ -52,6 +52,79 @@ const apiLimiter = rateLimit({
 });
 app.use("/api/", apiLimiter);
 app.use("/auth/", apiLimiter);
+
+// Stricter limiter for site-login to prevent brute-force
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts, please try again later." },
+});
+
+// ---- Site-access gate (username / password) ----
+
+const SITE_USER = process.env.SITE_USER || "";
+const SITE_PASS_HASH = process.env.SITE_PASS_HASH || ""; // SHA-256 hex of the password
+
+if (!SITE_USER || !SITE_PASS_HASH) {
+  console.warn(
+    "⚠  SITE_USER / SITE_PASS_HASH not set – site-access gate is DISABLED.\n" +
+    "   Generate a hash:  node -e \"console.log(require('crypto').createHash('sha256').update('YOUR_PASSWORD').digest('hex'))\""
+  );
+}
+
+function siteGateEnabled() {
+  return !!(SITE_USER && SITE_PASS_HASH);
+}
+
+function verifySitePassword(plain) {
+  const hash = crypto.createHash("sha256").update(String(plain)).digest("hex");
+  // Constant-time comparison to prevent timing attacks
+  return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(SITE_PASS_HASH, "hex"));
+}
+
+// Endpoints for site gate (placed BEFORE the gate middleware so they are accessible)
+app.post("/site/login", loginLimiter, (req, res) => {
+  if (!siteGateEnabled()) return res.json({ ok: true });
+  const { user, pass } = req.body || {};
+  if (
+    typeof user === "string" &&
+    typeof pass === "string" &&
+    user === SITE_USER &&
+    verifySitePassword(pass)
+  ) {
+    req.session.siteAuthed = true;
+    return res.json({ ok: true });
+  }
+  // Generic message — don't reveal which field was wrong
+  return res.status(401).json({ error: "Invalid credentials." });
+});
+
+app.get("/site/status", (req, res) => {
+  res.json({ gateEnabled: siteGateEnabled(), authed: !!req.session.siteAuthed });
+});
+
+app.post("/site/logout", (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+// Middleware: block everything else until site login is complete
+app.use((req, res, next) => {
+  if (!siteGateEnabled()) return next();
+  if (req.session.siteAuthed) return next();
+
+  // Allow the auth callback through (Salesforce redirects back here)
+  if (req.path === "/auth/callback") return next();
+
+  // For API / auth routes return 401 JSON
+  if (req.path.startsWith("/api/") || req.path.startsWith("/auth/")) {
+    return res.status(401).json({ error: "Site login required." });
+  }
+
+  // For page requests, serve index.html (the JS inside handles the gate UI)
+  next();
+});
 
 const SF_LOGIN_URL = normalizeBaseUrl(process.env.SF_LOGIN_URL || "https://login.salesforce.com");
 const CLIENT_ID = process.env.SF_CLIENT_ID;

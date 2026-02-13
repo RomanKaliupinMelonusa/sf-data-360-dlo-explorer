@@ -34,9 +34,43 @@
     th { position: sticky; top: 0; background: white; cursor:pointer; }
     code { background:#f7f7f7; padding:2px 6px; border-radius: 6px; }
     .muted { color: #666; font-size: 13px; }
+    /* Site-gate overlay */
+    #siteGate {
+      display: none;
+      position: fixed; inset: 0;
+      background: #f5f5f5;
+      z-index: 9999;
+      justify-content: center;
+      align-items: center;
+    }
+    #siteGate.visible { display: flex; }
+    #siteGate form {
+      background: white;
+      padding: 32px;
+      border-radius: 12px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.10);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 300px;
+    }
+    #siteGate h2 { margin: 0 0 4px; }
+    #siteGate .error { color: #c00; font-size: 13px; min-height: 18px; }
   </style>
 </head>
 <body>
+  <!-- Site-access gate -->
+  <div id="siteGate">
+    <form id="siteGateForm" autocomplete="on">
+      <h2>DLO Explorer</h2>
+      <p class="muted">Enter credentials to continue</p>
+      <input id="siteUser" name="username" type="text" placeholder="Username" autocomplete="username" required />
+      <input id="sitePass" name="password" type="password" placeholder="Password" autocomplete="current-password" required />
+      <button type="submit">Sign in</button>
+      <div class="error" id="siteGateError"></div>
+    </form>
+  </div>
+
   <header>
     <strong>DLO Explorer</strong>
     <span id="status" class="muted">Checking auth…</span>
@@ -401,6 +435,40 @@
   }
 
   async function init() {
+    // ---- Site-access gate ----
+    try {
+      const gateRes = await fetch("/site/status");
+      const gate = await gateRes.json();
+      if (gate.gateEnabled && !gate.authed) {
+        el("siteGate").classList.add("visible");
+        el("siteGateForm").addEventListener("submit", async (e) => {
+          e.preventDefault();
+          el("siteGateError").textContent = "";
+          try {
+            const r = await fetch("/site/login", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ user: el("siteUser").value, pass: el("sitePass").value }),
+            });
+            if (!r.ok) {
+              const err = await r.json().catch(() => ({}));
+              el("siteGateError").textContent = err.error || "Login failed.";
+              return;
+            }
+            el("siteGate").classList.remove("visible");
+            initApp();
+          } catch (err) {
+            el("siteGateError").textContent = "Network error. Please try again.";
+          }
+        });
+        return; // wait for form submit
+      }
+    } catch (_) { /* gate check failed — proceed normally */ }
+
+    initApp();
+  }
+
+  async function initApp() {
     try {
       const status = await api("/api/status");
       if (!status.loggedIn) {
