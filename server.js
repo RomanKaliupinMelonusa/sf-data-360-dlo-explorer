@@ -394,5 +394,11 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
   }
 });
 
-const PORT = Number(process.env.PORT || 3001);
-app.listen(PORT, () => console.log(`DLO Explorer server running on http://localhost:${PORT}`));
+// Vercel imports this module as a serverless function — export the app.
+export default app;
+
+// Only listen when running locally (not on Vercel).
+if (!process.env.VERCEL) {
+  const PORT = Number(process.env.PORT || 3001);
+  app.listen(PORT, () => console.log(`DLO Explorer server running on http://localhost:${PORT}`));
+}
