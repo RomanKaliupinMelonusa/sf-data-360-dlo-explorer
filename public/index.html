@@ -1034,49 +1034,106 @@
         `Raw relationship entries in DLO metadata: ${out.debug?.rawDloRelationshipCount ?? "?"}`,
       ];
 
-      // Show probe log if available
-      const probeLog = out.debug?.connectProbeLog || [];
-      let probeHtml = "";
-      if (probeLog.length) {
-        const probeRows = probeLog.map(p => {
-          const status = p.error ? `<span style="color:#ea001e">${esc(p.error)}</span>` : `${p.status}`;
-          return `<tr><td style="word-break:break-all"><code style="font-size:11px">${esc(p.url)}</code></td><td>${esc(p.tokenKind)}</td><td>${status}</td></tr>`;
-        }).join("");
-        probeHtml = `
-          <br/><strong>Connect API probe log</strong> (${probeLog.length} URLs tried):<br/>
-          <div style="overflow-x:auto; margin-top:6px;">
-            <table class="schema-table" style="font-size:11px;">
-              <thead><tr><th>URL</th><th>Token</th><th>Status</th></tr></thead>
-              <tbody>${probeRows}</tbody>
-            </table>
-          </div>
-          <br/>
-          <strong>How to fix:</strong><br/>
-          &nbsp;&nbsp;1. Visit <code>/api/debug/connect</code> in your browser to re-run the probe<br/>
-          &nbsp;&nbsp;2. If all probes return 404 — the Connect API may not be enabled for your org<br/>
-          &nbsp;&nbsp;3. If probes return 401/403 — your OAuth scope needs <code>cdp_api</code> or <code>data_cloud_api</code><br/>
-          &nbsp;&nbsp;4. If you know the correct base URL, set <code>DC_CONNECT_BASE_URL</code> in your .env file`;
-      }
-
       html = `<div class="muted" style="padding:16px; line-height:1.7;">
         <strong>No relationships found for this DLO.</strong>
         <br/><br/>
         <strong>Diagnostics:</strong><br/>
         ${checks.map(c => `&nbsp;&nbsp;• ${c}`).join("<br/>")}
-        ${probeHtml}
-        <br/><br/>
-        <strong>Common reasons:</strong><br/>
-        &nbsp;&nbsp;• SFMC engagement DLOs often have no metadata-level relationships<br/>
-        &nbsp;&nbsp;• DLO→DMO mappings are only visible via the Connect API<br/>
-        &nbsp;&nbsp;• The Connect API requires specific scopes or a custom base URL<br/>
-        <br/>
-        <strong>Google search tips:</strong><br/>
-        &nbsp;&nbsp;• <code>salesforce "connect api" "data cloud" dataModelObjectMappings site:developer.salesforce.com</code><br/>
-        &nbsp;&nbsp;• <code>salesforce cdp connect REST API "/services/data" "/connect/cdp"</code>
       </div>`;
     }
 
-    pane.innerHTML = html;
+    // ---- Raw API Responses debug panel (always shown) ----
+    const rawResps = out.debug?.rawResponses || [];
+    const probeLog = out.debug?.connectProbeLog || [];
+    let debugHtml = `
+      <div class="raw-debug-panel" style="margin-top:20px; border-top: 2px solid #e0e0e0; padding-top:16px;">
+        <details>
+          <summary style="cursor:pointer; font-weight:700; font-size:14px; color:#333; user-select:none;">
+            🔍 Raw API Responses <span class="badge badge-muted">${rawResps.length} call${rawResps.length !== 1 ? 's' : ''}</span>
+          </summary>
+          <div style="margin-top:12px;">
+            <p style="color:#666; font-size:12px; margin-bottom:12px;">
+              Every external HTTP call made during this lineage fetch is shown below with its raw response body.
+            </p>`;
+
+    if (probeLog.length) {
+      const probeRows = probeLog.map(p => {
+        const statusColor = p.status >= 200 && p.status < 300 ? '#2e844a' : p.status >= 400 ? '#ea001e' : '#666';
+        const status = p.error
+          ? `<span style="color:#ea001e">${esc(String(p.error))}</span>`
+          : `<span style="color:${statusColor};font-weight:600">${p.status}</span>`;
+        const bodyPreview = p.body
+          ? `<details style="margin-top:2px;"><summary style="cursor:pointer;font-size:10px;color:#888;">body</summary><pre style="font-size:10px;max-height:120px;overflow:auto;margin:2px 0;white-space:pre-wrap;word-break:break-word;">${esc(typeof p.body === 'object' ? JSON.stringify(p.body, null, 2) : String(p.body))}</pre></details>`
+          : '';
+        return `<tr>
+          <td style="word-break:break-all"><code style="font-size:11px">${esc(p.url)}</code>${bodyPreview}</td>
+          <td>${esc(p.tokenKind || '—')}</td>
+          <td>${status}</td>
+        </tr>`;
+      }).join("");
+      debugHtml += `
+        <div class="raw-debug-entry" style="margin-bottom:16px;">
+          <div style="font-weight:600; font-size:13px; margin-bottom:6px;">🌐 Connect API Auto-Discovery Probe Log</div>
+          <div style="overflow-x:auto;">
+            <table class="schema-table" style="font-size:11px;">
+              <thead><tr><th>URL Probed</th><th>Token</th><th>Status</th></tr></thead>
+              <tbody>${probeRows}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    for (const entry of rawResps) {
+      const statusColor = entry.status >= 200 && entry.status < 300 ? '#2e844a'
+        : entry.status >= 400 ? '#ea001e' : '#666';
+      const statusBadge = entry.status
+        ? `<span style="background:${statusColor}15; color:${statusColor}; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">${entry.status}</span>`
+        : (entry.error ? `<span style="background:#ea001e15; color:#ea001e; padding:2px 8px; border-radius:4px; font-size:11px;">ERROR</span>` : '');
+
+      const bodyJson = entry.body != null
+        ? (typeof entry.body === 'object' ? JSON.stringify(entry.body, null, 2) : String(entry.body))
+        : '(no body)';
+
+      const errorLine = entry.error
+        ? `<div style="color:#ea001e; font-size:12px; margin:4px 0;">⚠ ${esc(String(entry.error))}</div>` : '';
+
+      debugHtml += `
+        <div class="raw-debug-entry" style="margin-bottom:16px; border:1px solid #e0e0e0; border-radius:8px; overflow:hidden;">
+          <div style="background:#f9f9f9; padding:8px 12px; border-bottom:1px solid #e0e0e0; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span style="font-weight:600; font-size:13px;">${esc(entry.label || 'API Call')}</span>
+            ${statusBadge}
+            <span style="font-size:11px; color:#888;">${esc(entry.method || 'GET')}</span>
+          </div>
+          ${entry.url ? `<div style="padding:4px 12px; background:#f5f5f5; border-bottom:1px solid #eee; overflow-x:auto;">
+            <code style="font-size:11px; word-break:break-all; color:#555;">${esc(entry.url)}</code>
+          </div>` : ''}
+          ${errorLine}
+          <div style="padding:8px 12px; max-height:400px; overflow:auto;">
+            <pre style="margin:0; font-size:11px; line-height:1.5; white-space:pre-wrap; word-break:break-word; color:#333; background:transparent;">${esc(bodyJson)}</pre>
+          </div>
+        </div>`;
+    }
+
+    // Debug summary object
+    const debugSummary = { ...out.debug };
+    delete debugSummary.rawResponses; // already shown above
+    delete debugSummary.connectProbeLog; // already shown above
+    debugHtml += `
+        <div class="raw-debug-entry" style="margin-bottom:16px; border:1px solid #e0e0e0; border-radius:8px; overflow:hidden;">
+          <div style="background:#f9f9f9; padding:8px 12px; border-bottom:1px solid #e0e0e0;">
+            <span style="font-weight:600; font-size:13px;">📊 Debug Summary</span>
+          </div>
+          <div style="padding:8px 12px; max-height:300px; overflow:auto;">
+            <pre style="margin:0; font-size:11px; line-height:1.5; white-space:pre-wrap; word-break:break-word; color:#333; background:transparent;">${esc(JSON.stringify(debugSummary, null, 2))}</pre>
+          </div>
+        </div>`;
+
+    debugHtml += `
+          </div>
+        </details>
+      </div>`;
+
+    pane.innerHTML = html + debugHtml;
   }
 
   function toCsv(rows) {

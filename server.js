@@ -352,8 +352,11 @@ async function resolveConnectApiBase(req) {
     for (const mp of uniquePaths) {
       const probeUrl = `${c.base}/${mp}`;
       try {
-        const { resp } = await tryFetchJson(probeUrl, token);
-        probeLog.push({ url: probeUrl, tokenKind: c.tokenKind, status: resp.status });
+        const { resp, text } = await tryFetchJson(probeUrl, token);
+        // Capture body snippet for debugging (max 500 chars)
+        let bodySnippet = text ? text.slice(0, 500) : "";
+        try { bodySnippet = JSON.parse(text); } catch { /* keep as string */ }
+        probeLog.push({ url: probeUrl, tokenKind: c.tokenKind, status: resp.status, body: bodySnippet });
         if (resp.status === 200 || resp.status === 400) {
           auth.dc_connect_base_url = c.base;
           auth.dc_connect_token_kind = c.tokenKind;
@@ -612,15 +615,47 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
 
 /**
  * Related Objects (Lineage) for a DLO:
- * - Find DLO → DMO mappings via Connect API
+ * - Find DLO → DMO mappings via Connect API (SSOT endpoints)
  * - For each mapped DMO, pull metadata relationships
- * - Backfill join fields from fieldSourceTargetRelationships if needed
+ * - Fallback: scan all DMOs via metadata API for name matches
+ * - Captures raw responses at every step for debugging
  */
 app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
   try {
     await ensureTokens(req);
     const auth = req.session.auth;
     const dloName = req.params.name;
+
+    // Always re-probe so the debug panel shows fresh results
+    delete auth.dc_connect_base_url;
+    delete auth.dc_connect_token_kind;
+    delete auth.dc_connect_mapping_path;
+    req.session.auth = auth;
+
+    // Raw debug capture — every external call logged here
+    const rawResponses = [];
+    async function debugFetch(label, url, token, opts = {}) {
+      const entry = { label, url: url.toString(), method: opts.method || "GET", status: null, body: null, error: null };
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}`, ...(opts.headers || {}) },
+          signal: ctrl.signal,
+          ...(opts.method === "POST" ? { method: "POST", body: opts.body } : {}),
+        });
+        clearTimeout(timer);
+        entry.status = resp.status;
+        const text = await resp.text();
+        try { entry.body = JSON.parse(text); } catch { entry.body = text.slice(0, 2000); }
+        return { ok: resp.ok, status: resp.status, json: typeof entry.body === "object" ? entry.body : null, text };
+      } catch (e) {
+        entry.error = e.name === "AbortError" ? "Timeout (10s)" : String(e);
+        return { ok: false, status: 0, json: null, text: "" };
+      } finally {
+        rawResponses.push(entry);
+      }
+    }
 
     const mappingCollectionPath =
       req.session.auth?.dc_connect_mapping_path ||
@@ -630,17 +665,26 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
       process.env.DC_CONNECT_FIELD_REL_COLLECTION_PATH ||
       "ssot/field-source-target-relationships";
 
-    // 1) Get all DLO→DMO mappings
+    // ---- Step 1: Resolve Connect API base + fetch mappings ----
     let mappings = [];
     let connectAvailable = true;
     let connectProbeLog = [];
     try {
-      const mappingsJson = await connectApiGet(req, mappingCollectionPath);
-      mappings = pickList(mappingsJson);
+      const resolved = await resolveConnectApiBase(req);
+      connectProbeLog = resolved.probeLog || [];
+      const baseUrl = resolved.baseUrl;
+      const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
+
+      const mappingUrl = `${baseUrl.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}`;
+      const mResult = await debugFetch("Connect API: mappings", mappingUrl, token);
+      if (mResult.ok && mResult.json) {
+        mappings = pickList(mResult.json);
+      } else {
+        connectAvailable = false;
+      }
     } catch (e) {
-      // Connect API may not be available — fall back to metadata-only mode
       connectAvailable = false;
-      connectProbeLog = e?.probeLog || (e?.cause?.probeLog) || [];
+      connectProbeLog = e?.probeLog || [];
     }
 
     // Heuristic field extractors (payload shapes vary by org)
@@ -661,8 +705,11 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
     async function ensureFieldRelsLoaded() {
       if (fieldRels) return;
       try {
-        const fieldRelJson = await connectApiGet(req, relCollectionPath);
-        fieldRels = pickList(fieldRelJson);
+        const resolved = await resolveConnectApiBase(req);
+        const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
+        const relUrl = `${resolved.baseUrl.replace(/\/+$/, "")}/${relCollectionPath.replace(/^\/+/, "")}`;
+        const r = await debugFetch("Connect API: field relationships", relUrl, token);
+        fieldRels = r.ok && r.json ? pickList(r.json) : [];
       } catch {
         fieldRels = [];
       }
@@ -675,17 +722,6 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
 
     // 2) For each mapping, collect DMO relationships
     const out = [];
-
-    // Helper to fetch DMO metadata relationships
-    async function fetchDmoRelationships(dmoName) {
-      const metaUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
-      metaUrl.searchParams.set("entityType", "DataModelObject");
-      metaUrl.searchParams.set("entityName", dmoName);
-      const metaResp = await fetch(metaUrl, { headers: { Authorization: `Bearer ${auth.dc_access_token}` } });
-      if (!metaResp.ok) return null;
-      const metaJson = await metaResp.json();
-      return (metaJson.metadata || [])[0] || null;
-    }
 
     function normalizeRelationships(metaRels, dmoName) {
       return (metaRels || []).map((r) => {
@@ -721,27 +757,34 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
     }
 
     if (matched.length > 0) {
-      // We have Connect API mappings
       for (const m of matched) {
         const mappingId = getMappingId(m);
         const dmoName = getTargetDmo(m);
         if (!dmoName) continue;
 
-        // Fetch mapping detail (best effort)
         let fieldMappings = [];
         if (mappingId) {
           try {
-            const detail = await connectApiGet(req, `${mappingCollectionPath}/${encodeURIComponent(mappingId)}`);
-            const fm = detail?.fieldMappings || detail?.fieldMapping || detail?.mappings || detail?.fields || [];
-            fieldMappings = Array.isArray(fm) ? fm : [];
+            const resolved = await resolveConnectApiBase(req);
+            const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
+            const detUrl = `${resolved.baseUrl.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}/${encodeURIComponent(mappingId)}`;
+            const det = await debugFetch(`Connect API: mapping detail [${mappingId}]`, detUrl, token);
+            if (det.ok && det.json) {
+              const fm = det.json?.fieldMappings || det.json?.fieldMapping || det.json?.mappings || det.json?.fields || [];
+              fieldMappings = Array.isArray(fm) ? fm : [];
+            }
           } catch {}
         }
 
         // Fetch DMO metadata
-        const entity = await fetchDmoRelationships(dmoName);
-        const relatedObjects = normalizeRelationships(entity?.relationships, dmoName);
+        const dmoMetaUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
+        dmoMetaUrl.searchParams.set("entityType", "DataModelObject");
+        dmoMetaUrl.searchParams.set("entityName", dmoName);
+        const dmoResult = await debugFetch(`DC Metadata: DMO [${dmoName}]`, dmoMetaUrl, auth.dc_access_token);
+        const dmoEntity = dmoResult.ok && dmoResult.json ? (dmoResult.json.metadata || [])[0] : null;
+        const relatedObjects = normalizeRelationships(dmoEntity?.relationships, dmoName);
 
-        // Backfill join fields from fieldSourceTargetRelationships
+        // Backfill join fields
         const needsBackfill = relatedObjects.some((x) => !x.join.length);
         if (needsBackfill) {
           await ensureFieldRelsLoaded();
@@ -766,65 +809,71 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
         out.push({ dmoName, mappingSummary: m, fieldMappings, relatedObjects });
       }
     } else {
-      // No Connect API — scan all DMO metadata for relationships involving this DLO
-      try {
-        const allDmoUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
-        allDmoUrl.searchParams.set("entityType", "DataModelObject");
-        const allDmoResp = await fetch(allDmoUrl, { headers: { Authorization: `Bearer ${auth.dc_access_token}` } });
-        if (allDmoResp.ok) {
-          const allDmoJson = await allDmoResp.json();
-          const allDmos = allDmoJson.metadata || [];
-          const dloLower = dloName.toLowerCase();
-          const dloBase = dloLower.replace(/__dll$/, "");
-          const dloBaseShort = dloBase.replace(/_\d+$/, ""); // strip org-id suffix for SFMC DLOs
+      // ---- Step 2: No Connect API — scan all DMO metadata ----
+      const allDmoUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
+      allDmoUrl.searchParams.set("entityType", "DataModelObject");
+      const allDmoResult = await debugFetch("DC Metadata: all DMOs", allDmoUrl, auth.dc_access_token);
 
-          for (const dmo of allDmos) {
-            const dmoLower = (dmo.name || "").toLowerCase();
-            const dmoBase = dmoLower.replace(/__dlm$/, "");
+      let dmoScanInfo = { totalDmos: 0, dmoNames: [], dloBase: "", dloBaseShort: "" };
+      if (allDmoResult.ok && allDmoResult.json) {
+        const allDmos = allDmoResult.json.metadata || [];
+        const dloLower = dloName.toLowerCase();
+        const dloBase = dloLower.replace(/__dll$/, "");
+        const dloBaseShort = dloBase.replace(/_\d+$/, "");
+        dmoScanInfo = {
+          totalDmos: allDmos.length,
+          dmoNames: allDmos.slice(0, 100).map((d) => d.name),
+          dloNameLower: dloLower,
+          dloBase,
+          dloBaseShort,
+        };
 
-            // 1) Direct reference: a DMO relationship mentions this DLO by name
-            const hasDirectRef = (dmo.relationships || []).some((r) => {
-              const f = (r.fromEntity || "").toLowerCase();
-              const t = (r.toEntity || "").toLowerCase();
-              return f === dloLower || t === dloLower;
+        for (const dmo of allDmos) {
+          const dmoLower = (dmo.name || "").toLowerCase();
+          const dmoBase = dmoLower.replace(/__dlm$/, "");
+
+          const hasDirectRef = (dmo.relationships || []).some((r) => {
+            const f = (r.fromEntity || "").toLowerCase();
+            const t = (r.toEntity || "").toLowerCase();
+            return f === dloLower || t === dloLower;
+          });
+
+          const isNameRelated =
+            (dloBase === dmoBase || dloBaseShort === dmoBase) && dmoBase.length > 0;
+
+          if (hasDirectRef || isNameRelated) {
+            const relatedObjects = normalizeRelationships(dmo.relationships || [], dmo.name);
+            out.push({
+              dmoName: dmo.name,
+              displayName: dmo.displayName || dmo.name,
+              category: dmo.category || "",
+              fieldCount: (dmo.fields || []).length,
+              mappingSummary: null,
+              fieldMappings: [],
+              relatedObjects,
+              discoveredVia: hasDirectRef ? "metadata-reference" : "name-heuristic",
             });
-
-            // 2) Name heuristic: DLO base name matches DMO base name
-            //    e.g. ssot__Individual__dll  ↔  ssot__Individual__dlm
-            //    e.g. sfmc_email_click_12345__dll  ↔  sfmc_email_click__dlm
-            const isNameRelated =
-              (dloBase === dmoBase || dloBaseShort === dmoBase) && dmoBase.length > 0;
-
-            if (hasDirectRef || isNameRelated) {
-              const relatedObjects = normalizeRelationships(dmo.relationships || [], dmo.name);
-              out.push({
-                dmoName: dmo.name,
-                displayName: dmo.displayName || dmo.name,
-                category: dmo.category || "",
-                fieldCount: (dmo.fields || []).length,
-                mappingSummary: null,
-                fieldMappings: [],
-                relatedObjects,
-                discoveredVia: hasDirectRef ? "metadata-reference" : "name-heuristic",
-              });
-            }
           }
         }
-      } catch (scanErr) {
-        console.warn("DMO metadata scan failed:", scanErr.message);
       }
+
+      // Stash scan info in debug
+      rawResponses.push({
+        label: "DMO scan heuristic info",
+        body: dmoScanInfo,
+      });
     }
 
-    // 3) Always include DLO's own metadata relationships as a fallback/supplement
+    // ---- Step 3: DLO's own metadata relationships ----
     const dloMetaUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
     dloMetaUrl.searchParams.set("entityType", "DataLakeObject");
     dloMetaUrl.searchParams.set("entityName", dloName);
-    const dloMetaResp = await fetch(dloMetaUrl, { headers: { Authorization: `Bearer ${auth.dc_access_token}` } });
+    const dloResult = await debugFetch("DC Metadata: DLO detail", dloMetaUrl, auth.dc_access_token);
+
     let dloRelationships = [];
     let rawDloRelationships = [];
-    if (dloMetaResp.ok) {
-      const dloMetaJson = await dloMetaResp.json();
-      const dloEntity = (dloMetaJson.metadata || [])[0];
+    if (dloResult.ok && dloResult.json) {
+      const dloEntity = (dloResult.json.metadata || [])[0];
       rawDloRelationships = dloEntity?.relationships || [];
       if (rawDloRelationships.length) {
         dloRelationships = normalizeRelationships(rawDloRelationships, dloName);
@@ -843,6 +892,9 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
         dmoScanMatches: out.filter((d) => d.discoveredVia).length,
         totalDmoMatches: out.length,
         connectProbeLog,
+        mappingsReceived: mappings.length,
+        matchedMappings: matched.length,
+        rawResponses,
       },
     });
   } catch (e) {
