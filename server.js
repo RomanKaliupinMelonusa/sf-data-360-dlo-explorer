@@ -10,11 +10,16 @@
 import "dotenv/config";
 import express from "express";
 import session from "express-session";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 
+const IS_PROD = process.env.NODE_ENV === "production";
+
 const app = express();
+if (IS_PROD) app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -23,14 +28,30 @@ app.use(
     secret: process.env.SESSION_SECRET || "dev-secret-change-me",
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: "lax" },
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: IS_PROD,
+      maxAge: 2 * 60 * 60 * 1000, // 2 hours
+    },
   })
 );
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.static(path.join(__dirname, "public")));
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+app.use("/api/", apiLimiter);
+app.use("/auth/", apiLimiter);
 
 const SF_LOGIN_URL = normalizeBaseUrl(process.env.SF_LOGIN_URL || "https://login.salesforce.com");
 const CLIENT_ID = process.env.SF_CLIENT_ID;
@@ -65,11 +86,6 @@ async function sfTokenFromCode(code, verifier) {
     code,
     code_verifier: codeVerifier,
   });
-
-  const redacted = new URLSearchParams(body);
-  if (redacted.has("client_secret")) redacted.set("client_secret", "[redacted]");
-  console.log(`TOKEN URL: ${SF_LOGIN_URL}/services/oauth2/token`);
-  console.log(`TOKEN BODY: ${redacted.toString()}`);
 
   const resp = await fetch(`${SF_LOGIN_URL}/services/oauth2/token`, {
     method: "POST",
@@ -212,7 +228,8 @@ app.get("/auth/callback", async (req, res) => {
 
     res.redirect("/");
   } catch (e) {
-    res.status(500).send(String(e));
+    console.error("Auth callback error:", e);
+    res.status(500).send(IS_PROD ? "Authentication failed. Please try again." : String(e));
   }
 });
 
@@ -341,7 +358,18 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
         : selected.map((f) => `"${f.replaceAll('"', '""')}"`).join(", ");
 
     const builtSql = `SELECT ${selectClause} FROM "${dloName.replaceAll('"', '""')}"${whereClause}`;
-    const finalSql = typeof sql === "string" && sql.trim() ? sql.trim() : builtSql;
+    let finalSql = builtSql;
+    if (typeof sql === "string" && sql.trim()) {
+      const normalized = sql.trim();
+      if (!/^SELECT\s/i.test(normalized)) {
+        return res.status(400).json({ error: "Custom SQL must be a SELECT statement." });
+      }
+      // Block dangerous keywords
+      if (/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC|MERGE)\b/i.test(normalized)) {
+        return res.status(400).json({ error: "Mutation statements are not allowed." });
+      }
+      finalSql = normalized;
+    }
 
     const url = new URL(`${dc_instance_url}/api/v1/query`);
     url.searchParams.set("limit", String(lim));

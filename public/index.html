@@ -152,6 +152,12 @@
 
   const el = (id) => document.getElementById(id);
 
+  function esc(s) {
+    const d = document.createElement("div");
+    d.appendChild(document.createTextNode(String(s ?? "")));
+    return d.innerHTML;
+  }
+
   function setStatus(txt) { el("status").textContent = txt; }
 
   async function api(path, opts={}) {
@@ -165,9 +171,9 @@
     const filtered = state.dlos.filter(d => (d.displayName || d.name).toLowerCase().includes(q));
     el("dloCount").textContent = `${filtered.length} DLOs`;
     el("dloList").innerHTML = filtered.map(d => `
-      <div class="dlo ${state.selectedDlo===d.name ? "active" : ""}" data-name="${d.name}">
-        <div><strong>${d.displayName || d.name}</strong></div>
-        <div class="muted">${d.name} ${d.category ? "• " + d.category : ""}</div>
+      <div class="dlo ${state.selectedDlo===d.name ? "active" : ""}" data-name="${esc(d.name)}">
+        <div><strong>${esc(d.displayName || d.name)}</strong></div>
+        <div class="muted">${esc(d.name)} ${d.category ? "• " + esc(d.category) : ""}</div>
       </div>
     `).join("");
 
@@ -185,10 +191,10 @@
 
     el("fieldList").innerHTML = filtered.map(f => `
       <label style="display:flex; gap:8px; align-items:center; margin:6px 0;">
-        <input type="checkbox" data-f="${f.name}" ${state.selectedFields.has(f.name) ? "checked" : ""} />
+        <input type="checkbox" data-f="${esc(f.name)}" ${state.selectedFields.has(f.name) ? "checked" : ""} />
         <span>
-          <div><strong>${f.displayName || f.name}</strong></div>
-          <div class="muted">${f.name} • ${f.type || "?"}</div>
+          <div><strong>${esc(f.displayName || f.name)}</strong></div>
+          <div class="muted">${esc(f.name)} • ${esc(f.type || "?")}</div>
         </span>
       </label>
     `).join("");
@@ -223,9 +229,9 @@
       const rows = fields.map((f, i) => `
         <tr>
           <td class="num">${i + 1}</td>
-          <td>${f.displayName || f.name || ""}</td>
-          <td>${f.name || ""}</td>
-          <td>${f.type || ""}</td>
+          <td>${esc(f.displayName || f.name)}</td>
+          <td>${esc(f.name)}</td>
+          <td>${esc(f.type)}</td>
         </tr>
       `).join("");
 
@@ -250,9 +256,9 @@
       const rows = keys.map((k, i) => `
         <tr>
           <td class="num">${i + 1}</td>
-          <td>${k.displayName || k.name || ""}</td>
-          <td>${k.name || ""}</td>
-          <td>${k.indexOrder ?? ""}</td>
+          <td>${esc(k.displayName || k.name)}</td>
+          <td>${esc(k.name)}</td>
+          <td>${esc(k.indexOrder ?? "")}</td>
         </tr>
       `).join("");
 
@@ -358,9 +364,9 @@
     }
 
     const cols = Object.keys(rows[0]);
-    const header = cols.map(c => `<th data-col="${c}">${c}</th>`).join("");
+    const header = cols.map(c => `<th data-col="${esc(c)}">${esc(c)}</th>`).join("");
     const body = rows.map(r => `
-      <tr>${cols.map(c => `<td>${(r[c] ?? "").toString().replaceAll("<","&lt;")}</td>`).join("")}</tr>
+      <tr>${cols.map(c => `<td>${esc(r[c])}</td>`).join("")}</tr>
     `).join("");
 
     el("tableWrap").innerHTML = `
