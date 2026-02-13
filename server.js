@@ -321,33 +321,52 @@ async function resolveConnectApiBase(req) {
   const sf = normalizeBaseUrl(auth.sf_instance_url);
 
   const candidates = [
-    { base: `${dc}/api/v1`, tokenKind: "dc" },
-    { base: `${dc}/api/v1/connect`, tokenKind: "dc" },
-    { base: `${dc}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "dc" },
-    { base: `${dc}/services/data/v${sfVersion}/connect/data360`, tokenKind: "dc" },
+    // SF-side Connect API (most common)
+    { base: `${sf}/services/data/v${sfVersion}/connect/cdp`, tokenKind: "sf" },
     { base: `${sf}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "sf" },
     { base: `${sf}/services/data/v${sfVersion}/connect/data360`, tokenKind: "sf" },
+    // DC-side Connect API variants
+    { base: `${dc}/services/data/v${sfVersion}/connect/cdp`, tokenKind: "dc" },
+    { base: `${dc}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "dc" },
+    { base: `${dc}/services/data/v${sfVersion}/connect/data360`, tokenKind: "dc" },
+    { base: `${dc}/api/v1`, tokenKind: "dc" },
+    { base: `${dc}/api/v1/connect`, tokenKind: "dc" },
   ];
 
-  const mappingPath = process.env.DC_CONNECT_MAPPING_COLLECTION_PATH || "dataModelObjectMappings";
+  const mappingPaths = [
+    process.env.DC_CONNECT_MAPPING_COLLECTION_PATH || "dataModelObjectMappings",
+    "cdpDataModelObjectMappings",
+    "dataStreamMappings",
+  ];
+  // Deduplicate in case the env var equals one of the defaults
+  const uniquePaths = [...new Set(mappingPaths)];
 
+  const probeLog = [];
   for (const c of candidates) {
     const token = c.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
-    const probeUrl = `${c.base}/${mappingPath}`;
-    try {
-      const { resp } = await tryFetchJson(probeUrl, token);
-      if (resp.status === 200 || resp.status === 400) {
-        auth.dc_connect_base_url = c.base;
-        auth.dc_connect_token_kind = c.tokenKind;
-        req.session.auth = auth;
-        return { baseUrl: c.base, tokenKind: c.tokenKind };
+    for (const mp of uniquePaths) {
+      const probeUrl = `${c.base}/${mp}`;
+      try {
+        const { resp } = await tryFetchJson(probeUrl, token);
+        probeLog.push({ url: probeUrl, tokenKind: c.tokenKind, status: resp.status });
+        if (resp.status === 200 || resp.status === 400) {
+          auth.dc_connect_base_url = c.base;
+          auth.dc_connect_token_kind = c.tokenKind;
+          auth.dc_connect_mapping_path = mp;
+          req.session.auth = auth;
+          return { baseUrl: c.base, tokenKind: c.tokenKind, mappingPath: mp, probeLog };
+        }
+      } catch (probeErr) {
+        probeLog.push({ url: probeUrl, tokenKind: c.tokenKind, error: probeErr.name || String(probeErr) });
       }
-    } catch {}
+    }
   }
 
-  throw new Error(
+  const err = new Error(
     "Unable to auto-discover Data 360 Connect API base URL. Set DC_CONNECT_BASE_URL + DC_CONNECT_TOKEN env vars."
   );
+  err.probeLog = probeLog;
+  throw err;
 }
 
 async function connectApiGet(req, relPath, searchParams = {}) {
@@ -598,18 +617,23 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
     const auth = req.session.auth;
     const dloName = req.params.name;
 
-    const mappingCollectionPath = process.env.DC_CONNECT_MAPPING_COLLECTION_PATH || "dataModelObjectMappings";
+    const mappingCollectionPath =
+      req.session.auth?.dc_connect_mapping_path ||
+      process.env.DC_CONNECT_MAPPING_COLLECTION_PATH ||
+      "dataModelObjectMappings";
     const relCollectionPath = process.env.DC_CONNECT_FIELD_REL_COLLECTION_PATH || "fieldSourceTargetRelationships";
 
     // 1) Get all DLO→DMO mappings
     let mappings = [];
     let connectAvailable = true;
+    let connectProbeLog = [];
     try {
       const mappingsJson = await connectApiGet(req, mappingCollectionPath);
       mappings = pickList(mappingsJson);
     } catch (e) {
       // Connect API may not be available — fall back to metadata-only mode
       connectAvailable = false;
+      connectProbeLog = e?.probeLog || (e?.cause?.probeLog) || [];
     }
 
     // Heuristic field extractors (payload shapes vary by org)
@@ -811,6 +835,7 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
         rawDloRelationshipCount: rawDloRelationships.length,
         dmoScanMatches: out.filter((d) => d.discoveredVia).length,
         totalDmoMatches: out.length,
+        connectProbeLog,
       },
     });
   } catch (e) {
@@ -824,7 +849,7 @@ app.get("/api/debug/connect", requireAuth, async (req, res) => {
     const resolved = await resolveConnectApiBase(req);
     res.json({ ok: true, ...resolved });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok: false, error: String(e), probeLog: e.probeLog || [] });
   }
 });
 
