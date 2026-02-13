@@ -5,58 +5,390 @@
   <title>DLO Explorer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    :root {
+      --brand: #0176d3;
+      --brand-dark: #014486;
+      --brand-light: #e1f0ff;
+      --nav-bg: #032d60;
+      --text: #181818;
+      --text-muted: #706e6b;
+      --border: #d8dde6;
+      --bg: #f4f6f9;
+      --card-bg: #ffffff;
+      --radius: 8px;
+      --shadow: 0 2px 4px rgba(0,0,0,.08);
+      --font: 'Salesforce Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: var(--font); margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
+
+    /* Hide app until gate clears */
     header, main { display: none; }
-    body.app-ready header { display:flex; padding: 12px 16px; border-bottom: 1px solid #ddd; gap:12px; align-items:center; }
-    body.app-ready main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 58px); }
-    aside { border-right: 1px solid #ddd; padding: 12px; overflow:auto; }
-    section { padding: 12px; overflow:auto; }
-    input, button { padding: 8px; }
-    .row { display:flex; gap: 8px; align-items:center; flex-wrap: wrap; }
-    .dlo { padding: 8px; border: 1px solid #eee; border-radius: 10px; margin: 6px 0; cursor:pointer; }
-    .dlo:hover { background: #fafafa; }
-    .dlo.active { border-color: #666; background: #f5f5f5; }
-    .pill { font-size: 12px; padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; }
-    .grid { display:grid; grid-template-columns: 340px 1fr; gap: 12px; align-items:start; }
-    .panel { border: 1px solid #eee; border-radius: 12px; padding: 10px; }
-    .panel-header { display:flex; gap:16px; align-items:center; border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:8px; }
-    .meta-row { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px; font-size:12px; color:#666; }
-    .meta-row strong { display:block; color:#222; font-weight:600; }
-    .tabs { display:flex; gap:16px; border-bottom:1px solid #e5e5e5; margin-top:8px; }
-    .tab { padding:8px 2px; cursor:pointer; color:#666; font-weight:600; border-bottom:2px solid transparent; }
-    .tab.active { color:#111; border-bottom-color:#2f6fed; }
-    .tab-panel { display:none; }
-    .tab-panel.active { display:block; }
-    .table-scroll { margin-top:8px; overflow:auto; max-height: 75vh; }
-    .schema-table th { background:#fafafa; }
-    .num { width:40px; color:#777; text-align:right; padding-right:10px; }
+    body.app-ready header { display: flex; }
+    body.app-ready main { display: grid; }
+
+    /* ---- Header (Salesforce Global Nav style) ---- */
+    header {
+      background: var(--nav-bg);
+      color: #fff;
+      padding: 0 16px;
+      height: 48px;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 2px 4px rgba(0,0,0,.2);
+      z-index: 10;
+      position: relative;
+    }
+    header strong { font-size: 15px; letter-spacing: .3px; }
+    header .status { font-size: 12px; color: rgba(255,255,255,.7); }
+    header .spacer { flex: 1; }
+    header button {
+      background: rgba(255,255,255,.15);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,.25);
+      padding: 6px 16px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    header button:hover { background: rgba(255,255,255,.25); }
+
+    /* ---- Main layout ---- */
+    main {
+      grid-template-columns: 280px 1fr;
+      height: calc(100vh - 48px);
+    }
+
+    /* ---- Sidebar ---- */
+    aside {
+      background: var(--card-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-header input {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .sidebar-header input:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(1,118,211,.15);
+    }
+    .sidebar-count {
+      padding: 6px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      border-bottom: 1px solid var(--border);
+      background: #fafbfc;
+    }
+    #dloList {
+      flex: 1;
+      overflow: auto;
+      padding: 4px 0;
+    }
+    .dlo {
+      padding: 10px 12px;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: background .1s, border-color .1s;
+    }
+    .dlo:hover { background: var(--brand-light); }
+    .dlo.active {
+      background: var(--brand-light);
+      border-left-color: var(--brand);
+    }
+    .dlo-name { font-weight: 600; font-size: 13px; color: var(--text); }
+    .dlo-api { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+    /* ---- Right content area ---- */
+    section {
+      overflow: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* ---- Toolbar row ---- */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px 12px;
+      box-shadow: var(--shadow);
+    }
+    .toolbar label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+    .toolbar input[type=number] {
+      width: 80px;
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .toolbar input[type=number]:focus {
+      border-color: var(--brand);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(1,118,211,.15);
+    }
+    .toolbar .pill {
+      font-size: 11px;
+      padding: 3px 10px;
+      background: var(--brand-light);
+      color: var(--brand-dark);
+      border-radius: 12px;
+      font-weight: 600;
+    }
+
+    /* ---- Buttons (Salesforce Lightning style) ---- */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--card-bg);
+      color: var(--brand);
+      cursor: pointer;
+      transition: background .12s, border-color .12s;
+    }
+    .btn:hover { background: #f4f6f9; border-color: var(--brand); }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn-brand {
+      background: var(--brand);
+      color: #fff;
+      border-color: var(--brand);
+    }
+    .btn-brand:hover { background: var(--brand-dark); }
+    .btn-sm { padding: 4px 10px; font-size: 11px; }
+
+    /* ---- Grid layout for panels ---- */
+    .content-grid {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 12px;
+      align-items: start;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ---- Card / Panel ---- */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: #fafbfc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-header strong { font-size: 13px; }
+    .card-body { padding: 12px; }
+
+    /* ---- Field search inside card ---- */
+    .field-search {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    .field-search:focus {
+      border-color: var(--brand);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(1,118,211,.15);
+    }
+    .field-count {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    #fieldList { max-height: 42vh; overflow: auto; }
+    #fieldList label {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 5px 0;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: 13px;
+    }
+    #fieldList label:last-child { border-bottom: none; }
+    #fieldList .field-label { font-weight: 600; font-size: 12px; }
+    #fieldList .field-api { font-size: 11px; color: var(--text-muted); }
+
+    /* ---- WHERE / SQL section ---- */
+    .query-section { margin-top: 10px; }
+    .query-section .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      margin-bottom: 6px;
+    }
+    .query-section input[type=text],
+    .query-section textarea {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: var(--font);
+    }
+    .query-section input:focus,
+    .query-section textarea:focus {
+      border-color: var(--brand);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(1,118,211,.15);
+    }
+    .query-section textarea { resize: vertical; }
+
+    /* ---- SQL output ---- */
+    .sql-output {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+    .sql-output code {
+      background: #f4f6f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    /* ---- Meta header ---- */
+    .meta-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: #fafbfc;
+    }
+    .meta-row strong { display: block; color: var(--text); font-weight: 600; margin-top: 2px; }
+
+    /* ---- Tabs ---- */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 2px solid var(--border);
+      margin: 0;
+      padding: 0 12px;
+      background: #fafbfc;
+    }
+    .tab {
+      padding: 10px 16px;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 13px;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color .12s, border-color .12s;
+    }
+    .tab:hover { color: var(--brand); }
+    .tab.active { color: var(--brand); border-bottom-color: var(--brand); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; padding: 12px; }
+
+    /* ---- Tables ---- */
     table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #eee; text-align:left; padding: 8px; font-size: 13px; }
-    th { position: sticky; top: 0; background: white; cursor:pointer; }
-    code { background:#f7f7f7; padding:2px 6px; border-radius: 6px; }
-    .muted { color: #666; font-size: 13px; }
-    /* Site-gate overlay */
+    th, td { border-bottom: 1px solid #eee; text-align: left; padding: 8px 10px; font-size: 12px; }
+    th {
+      position: sticky; top: 0;
+      background: #fafbfc;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: .4px;
+      cursor: pointer;
+      border-bottom: 2px solid var(--border);
+    }
+    .num { width: 36px; color: var(--text-muted); text-align: right; padding-right: 10px; }
+    .table-scroll { overflow: auto; max-height: 75vh; }
+
+    code { background: #f4f6f9; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    .muted { color: var(--text-muted); font-size: 12px; }
+
+    /* ---- Site-gate overlay ---- */
     #siteGate {
       display: none;
       position: fixed; inset: 0;
-      background: #f5f5f5;
+      background: linear-gradient(135deg, #032d60 0%, #0176d3 100%);
       z-index: 9999;
       justify-content: center;
       align-items: center;
     }
     #siteGate.visible { display: flex; }
     #siteGate form {
-      background: white;
-      padding: 32px;
+      background: var(--card-bg);
+      padding: 36px 32px;
       border-radius: 12px;
-      box-shadow: 0 2px 16px rgba(0,0,0,0.10);
+      box-shadow: 0 8px 32px rgba(0,0,0,.25);
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      min-width: 300px;
+      gap: 14px;
+      min-width: 340px;
     }
-    #siteGate h2 { margin: 0 0 4px; }
-    #siteGate .error { color: #c00; font-size: 13px; min-height: 18px; }
+    #siteGate h2 { margin: 0; font-size: 20px; color: var(--nav-bg); }
+    #siteGate .muted { margin: 0; }
+    #siteGate input {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    #siteGate input:focus {
+      border-color: var(--brand);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(1,118,211,.2);
+    }
+    #siteGate button[type=submit] {
+      background: var(--brand);
+      color: #fff;
+      border: none;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #siteGate button[type=submit]:hover { background: var(--brand-dark); }
+    #siteGate .error { color: #ea001e; font-size: 13px; min-height: 18px; }
   </style>
 </head>
 <body>
@@ -74,82 +406,85 @@
 
   <header>
     <strong>DLO Explorer</strong>
-    <span id="status" class="muted">Checking auth…</span>
-    <div style="flex:1"></div>
-    <button id="loginBtn" style="display:none">Login</button>
-    <button id="logoutBtn" style="display:none">Logout</button>
+    <span id="status" class="status">Checking auth…</span>
+    <div class="spacer"></div>
+    <button id="loginBtn" style="display:none">Log In</button>
+    <button id="logoutBtn" style="display:none">Log Out</button>
   </header>
 
   <main>
     <aside>
-      <div class="row">
-        <input id="dloSearch" placeholder="Search DLOs…" style="flex:1" />
+      <div class="sidebar-header">
+        <input id="dloSearch" placeholder="Search DLOs…" />
       </div>
-      <div class="muted" style="margin:10px 0" id="dloCount"></div>
+      <div class="sidebar-count" id="dloCount">0 DLOs</div>
       <div id="dloList"></div>
     </aside>
 
     <section>
-      <div class="row">
-        <label>Rows:</label>
-        <input id="limit" type="number" min="1" max="5000" value="100" style="width:100px" />
-        <label>Offset:</label>
-        <input id="offset" type="number" min="0" value="0" style="width:120px" />
-        <button id="prevBtn">Prev</button>
-        <button id="nextBtn">Next</button>
+      <div class="toolbar">
+        <label>Rows</label>
+        <input id="limit" type="number" min="1" max="5000" value="100" />
+        <label>Offset</label>
+        <input id="offset" type="number" min="0" value="0" />
+        <button class="btn btn-sm" id="prevBtn">◀ Prev</button>
+        <button class="btn btn-sm" id="nextBtn">Next ▶</button>
+        <div style="flex:1"></div>
         <span class="pill" id="selectedDloPill">No DLO selected</span>
       </div>
 
-      <div class="grid" style="margin-top:12px;">
-        <div class="panel">
-          <div class="row">
+      <div class="content-grid">
+        <!-- Left: Field picker & query controls -->
+        <div class="card">
+          <div class="card-header">
             <strong>Fields</strong>
             <div style="flex:1"></div>
-            <button id="allFieldsBtn">All</button>
-            <button id="noFieldsBtn">None</button>
+            <button class="btn btn-sm" id="allFieldsBtn">All</button>
+            <button class="btn btn-sm" id="noFieldsBtn">None</button>
           </div>
-          <input id="fieldSearch" placeholder="Search fields…" style="width:100%; margin:8px 0" />
-          <div class="muted" id="fieldCount"></div>
-          <div id="fieldList" style="max-height: 50vh; overflow:auto; margin-top:8px;"></div>
+          <div class="card-body">
+            <input class="field-search" id="fieldSearch" placeholder="Search fields…" />
+            <div class="field-count" id="fieldCount"></div>
+            <div id="fieldList"></div>
 
-          <div style="margin-top:10px;">
-            <div class="muted">Optional WHERE (simple):</div>
-            <input id="where" placeholder='e.g. "Status__c" = ''Active''' style="width:100%; margin-top:6px" />
-          </div>
+            <div class="query-section">
+              <div class="section-label">WHERE clause</div>
+              <input type="text" id="where" placeholder='e.g. "Status__c" = &#39;Active&#39;' />
+            </div>
 
-          <div style="margin-top:12px;">
-            <label style="display:flex; gap:8px; align-items:center;">
-              <input type="checkbox" id="useCustomSql" />
-              <span>Use custom SQL</span>
-            </label>
-            <textarea id="customSql" rows="5" style="width:100%; margin-top:6px; display:none;"></textarea>
-            <div class="muted" style="margin-top:4px;">When enabled, field selection/WHERE are ignored.</div>
-          </div>
+            <div class="query-section">
+              <label style="display:flex; gap:8px; align-items:center; font-size:12px; font-weight:600;">
+                <input type="checkbox" id="useCustomSql" />
+                Custom SQL
+              </label>
+              <textarea id="customSql" rows="4" style="display:none; margin-top:6px;"></textarea>
+              <div class="muted" style="margin-top:4px;">Overrides field selection &amp; WHERE.</div>
+            </div>
 
-          <div class="row" style="margin-top:10px;">
-            <button id="runBtn">Run preview</button>
-            <button id="copySqlBtn" disabled>Copy SQL</button>
-            <button id="csvBtn" disabled>Export CSV</button>
+            <div style="display:flex; gap:6px; margin-top:12px; flex-wrap:wrap;">
+              <button class="btn btn-brand" id="runBtn">▶ Run Preview</button>
+              <button class="btn" id="copySqlBtn" disabled>Copy SQL</button>
+              <button class="btn" id="csvBtn" disabled>Export CSV</button>
+            </div>
+            <div class="muted" style="margin-top:8px;" id="queryMeta"></div>
+            <div class="sql-output">SQL: <code id="sqlText">—</code></div>
           </div>
-          <div class="muted" style="margin-top:8px;" id="queryMeta"></div>
-          <div class="muted" style="margin-top:8px;">SQL: <code id="sqlText">—</code></div>
         </div>
 
-        <div class="panel">
-          <div class="panel-header">
-            <div class="meta-row" style="width:100%">
-              <div>
-                <span>Label</span>
-                <strong id="metaLabel">—</strong>
-              </div>
-              <div>
-                <span>API Name</span>
-                <strong id="metaApi">—</strong>
-              </div>
-              <div>
-                <span>Category</span>
-                <strong id="metaCategory">—</strong>
-              </div>
+        <!-- Right: Schema & Data tabs -->
+        <div class="card">
+          <div class="meta-row">
+            <div>
+              <span>Label</span>
+              <strong id="metaLabel">—</strong>
+            </div>
+            <div>
+              <span>API Name</span>
+              <strong id="metaApi">—</strong>
+            </div>
+            <div>
+              <span>Category</span>
+              <strong id="metaCategory">—</strong>
             </div>
           </div>
 
@@ -207,8 +542,8 @@
     el("dloCount").textContent = `${filtered.length} DLOs`;
     el("dloList").innerHTML = filtered.map(d => `
       <div class="dlo ${state.selectedDlo===d.name ? "active" : ""}" data-name="${esc(d.name)}">
-        <div><strong>${esc(d.displayName || d.name)}</strong></div>
-        <div class="muted">${esc(d.name)} ${d.category ? "• " + esc(d.category) : ""}</div>
+        <div class="dlo-name">${esc(d.displayName || d.name)}</div>
+        <div class="dlo-api">${esc(d.name)} ${d.category ? "• " + esc(d.category) : ""}</div>
       </div>
     `).join("");
 
@@ -225,11 +560,11 @@
     el("fieldCount").textContent = `${filtered.length} fields (selected: ${state.selectedFields.size})`;
 
     el("fieldList").innerHTML = filtered.map(f => `
-      <label style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+      <label>
         <input type="checkbox" data-f="${esc(f.name)}" ${state.selectedFields.has(f.name) ? "checked" : ""} />
         <span>
-          <div><strong>${esc(f.displayName || f.name)}</strong></div>
-          <div class="muted">${esc(f.name)} • ${esc(f.type || "?")}</div>
+          <div class="field-label">${esc(f.displayName || f.name)}</div>
+          <div class="field-api">${esc(f.name)} • ${esc(f.type || "?")}</div>
         </span>
       </label>
     `).join("");
