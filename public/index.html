@@ -1,0 +1,322 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DLO Explorer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    header { padding: 12px 16px; border-bottom: 1px solid #ddd; display:flex; gap:12px; align-items:center; }
+    main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 58px); }
+    aside { border-right: 1px solid #ddd; padding: 12px; overflow:auto; }
+    section { padding: 12px; overflow:auto; }
+    input, button { padding: 8px; }
+    .row { display:flex; gap: 8px; align-items:center; flex-wrap: wrap; }
+    .dlo { padding: 8px; border: 1px solid #eee; border-radius: 10px; margin: 6px 0; cursor:pointer; }
+    .dlo:hover { background: #fafafa; }
+    .dlo.active { border-color: #666; background: #f5f5f5; }
+    .pill { font-size: 12px; padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; }
+    .grid { display:grid; grid-template-columns: 340px 1fr; gap: 12px; align-items:start; }
+    .panel { border: 1px solid #eee; border-radius: 12px; padding: 10px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #eee; text-align:left; padding: 8px; font-size: 13px; }
+    th { position: sticky; top: 0; background: white; cursor:pointer; }
+    code { background:#f7f7f7; padding:2px 6px; border-radius: 6px; }
+    .muted { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>DLO Explorer</strong>
+    <span id="status" class="muted">Checking auth…</span>
+    <div style="flex:1"></div>
+    <button id="loginBtn" style="display:none">Login</button>
+    <button id="logoutBtn" style="display:none">Logout</button>
+  </header>
+
+  <main>
+    <aside>
+      <div class="row">
+        <input id="dloSearch" placeholder="Search DLOs…" style="flex:1" />
+      </div>
+      <div class="muted" style="margin:10px 0" id="dloCount"></div>
+      <div id="dloList"></div>
+    </aside>
+
+    <section>
+      <div class="row">
+        <label>Rows:</label>
+        <input id="limit" type="number" min="1" max="5000" value="100" style="width:100px" />
+        <label>Offset:</label>
+        <input id="offset" type="number" min="0" value="0" style="width:120px" />
+        <button id="prevBtn">Prev</button>
+        <button id="nextBtn">Next</button>
+        <span class="pill" id="selectedDloPill">No DLO selected</span>
+      </div>
+
+      <div class="grid" style="margin-top:12px;">
+        <div class="panel">
+          <div class="row">
+            <strong>Fields</strong>
+            <div style="flex:1"></div>
+            <button id="allFieldsBtn">All</button>
+            <button id="noFieldsBtn">None</button>
+          </div>
+          <input id="fieldSearch" placeholder="Search fields…" style="width:100%; margin:8px 0" />
+          <div class="muted" id="fieldCount"></div>
+          <div id="fieldList" style="max-height: 50vh; overflow:auto; margin-top:8px;"></div>
+
+          <div style="margin-top:10px;">
+            <div class="muted">Optional WHERE (simple):</div>
+            <input id="where" placeholder='e.g. "Status__c" = ''Active''' style="width:100%; margin-top:6px" />
+          </div>
+
+          <div class="row" style="margin-top:10px;">
+            <button id="runBtn">Run preview</button>
+            <button id="copySqlBtn" disabled>Copy SQL</button>
+            <button id="csvBtn" disabled>Export CSV</button>
+          </div>
+          <div class="muted" style="margin-top:8px;" id="queryMeta"></div>
+          <div class="muted" style="margin-top:8px;">SQL: <code id="sqlText">—</code></div>
+        </div>
+
+        <div class="panel">
+          <strong>Preview</strong>
+          <div id="tableWrap" style="margin-top:8px; overflow:auto; max-height: 75vh;"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+<script>
+  const state = {
+    dlos: [],
+    entity: null,
+    selectedDlo: null,
+    fields: [],
+    selectedFields: new Set(),
+    lastSql: "",
+    lastRows: [],
+    sort: { field: "", dir: "ASC" }
+  };
+
+  const el = (id) => document.getElementById(id);
+
+  function setStatus(txt) { el("status").textContent = txt; }
+
+  async function api(path, opts={}) {
+    const r = await fetch(path, opts);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+
+  function renderDlos() {
+    const q = el("dloSearch").value.trim().toLowerCase();
+    const filtered = state.dlos.filter(d => (d.displayName || d.name).toLowerCase().includes(q));
+    el("dloCount").textContent = `${filtered.length} DLOs`;
+    el("dloList").innerHTML = filtered.map(d => `
+      <div class="dlo ${state.selectedDlo===d.name ? "active" : ""}" data-name="${d.name}">
+        <div><strong>${d.displayName || d.name}</strong></div>
+        <div class="muted">${d.name} ${d.category ? "• " + d.category : ""}</div>
+      </div>
+    `).join("");
+
+    document.querySelectorAll(".dlo").forEach(node => {
+      node.addEventListener("click", () => selectDlo(node.dataset.name));
+    });
+  }
+
+  function renderFields() {
+    const q = el("fieldSearch").value.trim().toLowerCase();
+    const filtered = state.fields.filter(f =>
+      (f.displayName || f.name).toLowerCase().includes(q) || f.name.toLowerCase().includes(q)
+    );
+    el("fieldCount").textContent = `${filtered.length} fields (selected: ${state.selectedFields.size})`;
+
+    el("fieldList").innerHTML = filtered.map(f => `
+      <label style="display:flex; gap:8px; align-items:center; margin:6px 0;">
+        <input type="checkbox" data-f="${f.name}" ${state.selectedFields.has(f.name) ? "checked" : ""} />
+        <span>
+          <div><strong>${f.displayName || f.name}</strong></div>
+          <div class="muted">${f.name} • ${f.type || "?"}</div>
+        </span>
+      </label>
+    `).join("");
+
+    el("fieldList").querySelectorAll("input[type=checkbox]").forEach(cb => {
+      cb.addEventListener("change", () => {
+        const f = cb.dataset.f;
+        if (cb.checked) state.selectedFields.add(f);
+        else state.selectedFields.delete(f);
+        renderFields();
+      });
+    });
+  }
+
+  function setSelectedDloPill() {
+    el("selectedDloPill").textContent = state.selectedDlo ? `Selected: ${state.selectedDlo}` : "No DLO selected";
+  }
+
+  async function selectDlo(name) {
+    state.selectedDlo = name;
+    setSelectedDloPill();
+    renderDlos();
+
+    setStatus(`Loading fields for ${name}…`);
+    const meta = await api(`/api/dlo/${encodeURIComponent(name)}/meta`);
+    state.entity = meta.entity;
+    state.fields = (meta.entity.fields || []).slice().sort((a,b) => a.name.localeCompare(b.name));
+    state.selectedFields = new Set(state.fields.map(f => f.name));
+    state.sort = { field: "", dir: "ASC" };
+    renderFields();
+    setStatus(`Ready (${name})`);
+  }
+
+  function buildOrderBy() {
+    if (!state.sort.field) return "";
+    return `${state.sort.field} ${state.sort.dir}`;
+  }
+
+  async function runPreview() {
+    if (!state.selectedDlo) return alert("Select a DLO first.");
+    const limit = Number(el("limit").value || 100);
+    const offset = Number(el("offset").value || 0);
+    const where = el("where").value || "";
+
+    const fields = Array.from(state.selectedFields);
+    if (fields.length === 0) return alert("Select at least 1 field (or click All).");
+
+    setStatus("Querying…");
+    const payload = { fields, limit, offset, orderby: buildOrderBy(), where };
+
+    const out = await api(`/api/dlo/${encodeURIComponent(state.selectedDlo)}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    state.lastSql = out.sql;
+    el("sqlText").textContent = out.sql;
+    el("copySqlBtn").disabled = false;
+
+    const result = out.result || {};
+    const rows = result.data || [];
+    state.lastRows = rows;
+    el("csvBtn").disabled = rows.length === 0;
+
+    el("queryMeta").textContent =
+      `rowCount=${result.rowCount ?? "?"} • done=${result.done ?? "?"} • queryId=${result.queryId ?? "?"}`;
+
+    renderTable(rows);
+    setStatus("Ready");
+  }
+
+  function renderTable(rows) {
+    if (!rows || rows.length === 0) {
+      el("tableWrap").innerHTML = `<div class="muted">No rows returned.</div>`;
+      return;
+    }
+
+    const cols = Object.keys(rows[0]);
+    const header = cols.map(c => `<th data-col="${c}">${c}</th>`).join("");
+    const body = rows.map(r => `
+      <tr>${cols.map(c => `<td>${(r[c] ?? "").toString().replaceAll("<","&lt;")}</td>`).join("")}</tr>
+    `).join("");
+
+    el("tableWrap").innerHTML = `
+      <table>
+        <thead><tr>${header}</tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    `;
+
+    el("tableWrap").querySelectorAll("th").forEach(th => {
+      th.addEventListener("click", async () => {
+        const col = th.dataset.col;
+        if (state.sort.field === col) {
+          state.sort.dir = (state.sort.dir === "ASC") ? "DESC" : "ASC";
+        } else {
+          state.sort.field = col;
+          state.sort.dir = "ASC";
+        }
+        await runPreview();
+      });
+    });
+  }
+
+  function toCsv(rows) {
+    if (!rows.length) return "";
+    const cols = Object.keys(rows[0]);
+    const esc = (v) => {
+      const s = (v ?? "").toString().replaceAll('"','""');
+      return `"${s}"`;
+    };
+    return [cols.join(","), ...rows.map(r => cols.map(c => esc(r[c])).join(","))].join("\n");
+  }
+
+  async function init() {
+    try {
+      const status = await api("/api/status");
+      if (!status.loggedIn) {
+        setStatus("Not logged in.");
+        el("loginBtn").style.display = "";
+        el("loginBtn").onclick = () => location.href = "/auth/login";
+        return;
+      }
+
+      el("logoutBtn").style.display = "";
+      el("logoutBtn").onclick = async () => {
+        await fetch("/auth/logout", { method: "POST" });
+        location.reload();
+      };
+
+      setStatus("Loading DLOs…");
+      const dlos = await api("/api/dlos");
+      state.dlos = dlos.dlos || [];
+      renderDlos();
+      setSelectedDloPill();
+      setStatus("Ready (select a DLO).");
+    } catch (e) {
+      setStatus("Error");
+      alert(e);
+    }
+  }
+
+  el("dloSearch").addEventListener("input", renderDlos);
+  el("fieldSearch").addEventListener("input", renderFields);
+  el("allFieldsBtn").addEventListener("click", () => { state.fields.forEach(f => state.selectedFields.add(f.name)); renderFields(); });
+  el("noFieldsBtn").addEventListener("click", () => { state.selectedFields.clear(); renderFields(); });
+  el("runBtn").addEventListener("click", runPreview);
+
+  el("prevBtn").addEventListener("click", () => {
+    const limit = Number(el("limit").value || 100);
+    el("offset").value = Math.max(0, Number(el("offset").value || 0) - limit);
+    runPreview();
+  });
+
+  el("nextBtn").addEventListener("click", () => {
+    const limit = Number(el("limit").value || 100);
+    el("offset").value = Number(el("offset").value || 0) + limit;
+    runPreview();
+  });
+
+  el("copySqlBtn").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(state.lastSql || "");
+    alert("SQL copied.");
+  });
+
+  el("csvBtn").addEventListener("click", () => {
+    const csv = toCsv(state.lastRows || []);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${state.selectedDlo || "export"}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  init();
+</script>
+</body>
+</html>
