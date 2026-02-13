@@ -257,7 +257,11 @@ function requireAuth(req, res, next) {
 
 function pickList(json) {
   if (!json) return [];
-  return json.data || json.items || json.results || json.records || json.metadata || [];
+  return (
+    json.data || json.members || json.dataModelObjectMappings ||
+    json.fieldSourceTargetRelationships || json.items ||
+    json.results || json.records || json.metadata || []
+  );
 }
 
 function safeStr(v) {
@@ -321,22 +325,23 @@ async function resolveConnectApiBase(req) {
   const sf = normalizeBaseUrl(auth.sf_instance_url);
 
   const candidates = [
-    // SF-side Connect API (most common)
+    // SSOT namespace on SF org host (correct per Data 360 Connect REST API docs)
+    { base: `${sf}/services/data/v${sfVersion}`, tokenKind: "sf" },
+    // Legacy Connect namespace variants on SF org host
     { base: `${sf}/services/data/v${sfVersion}/connect/cdp`, tokenKind: "sf" },
     { base: `${sf}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "sf" },
-    { base: `${sf}/services/data/v${sfVersion}/connect/data360`, tokenKind: "sf" },
-    // DC-side Connect API variants
-    { base: `${dc}/services/data/v${sfVersion}/connect/cdp`, tokenKind: "dc" },
-    { base: `${dc}/services/data/v${sfVersion}/connect/dataCloud`, tokenKind: "dc" },
-    { base: `${dc}/services/data/v${sfVersion}/connect/data360`, tokenKind: "dc" },
+    // DC tenant host (unlikely but try last)
+    { base: `${dc}/services/data/v${sfVersion}`, tokenKind: "dc" },
     { base: `${dc}/api/v1`, tokenKind: "dc" },
-    { base: `${dc}/api/v1/connect`, tokenKind: "dc" },
   ];
 
   const mappingPaths = [
+    // SSOT namespace paths (primary)
+    "ssot/data-model-object-mappings",
+    "ssot/dataModelObjectMappings",
+    // Legacy / Connect namespace paths
     process.env.DC_CONNECT_MAPPING_COLLECTION_PATH || "dataModelObjectMappings",
     "cdpDataModelObjectMappings",
-    "dataStreamMappings",
   ];
   // Deduplicate in case the env var equals one of the defaults
   const uniquePaths = [...new Set(mappingPaths)];
@@ -620,8 +625,10 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
     const mappingCollectionPath =
       req.session.auth?.dc_connect_mapping_path ||
       process.env.DC_CONNECT_MAPPING_COLLECTION_PATH ||
-      "dataModelObjectMappings";
-    const relCollectionPath = process.env.DC_CONNECT_FIELD_REL_COLLECTION_PATH || "fieldSourceTargetRelationships";
+      "ssot/data-model-object-mappings";
+    const relCollectionPath =
+      process.env.DC_CONNECT_FIELD_REL_COLLECTION_PATH ||
+      "ssot/field-source-target-relationships";
 
     // 1) Get all DLO→DMO mappings
     let mappings = [];
@@ -843,13 +850,57 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
   }
 });
 
-// Debug: check Connect API base URL resolution
+// Debug: check Connect API base URL resolution + SSOT availability
 app.get("/api/debug/connect", requireAuth, async (req, res) => {
   try {
     const resolved = await resolveConnectApiBase(req);
     res.json({ ok: true, ...resolved });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e), probeLog: e.probeLog || [] });
+  }
+});
+
+app.get("/api/connect/status", requireAuth, async (req, res) => {
+  try {
+    await ensureTokens(req);
+    const auth = req.session.auth;
+    const sfVersion = await sfGetLatestApiVersion(auth.sf_instance_url, auth.sf_access_token);
+    const sfBase = `${normalizeBaseUrl(auth.sf_instance_url)}/services/data/v${sfVersion}`;
+
+    // Check if /services/data/vXX.X/ lists an "ssot" resource
+    let ssotAvailable = false;
+    let resourceKeys = [];
+    try {
+      const { resp, json } = await tryFetchJson(`${sfBase}/`, auth.sf_access_token);
+      if (resp.ok && json) {
+        resourceKeys = Object.keys(json);
+        ssotAvailable = resourceKeys.includes("ssot");
+      }
+    } catch {}
+
+    // Quick probe of the SSOT mapping endpoint
+    let ssotMappingProbe = null;
+    try {
+      const { resp } = await tryFetchJson(
+        `${sfBase}/ssot/data-model-object-mappings`,
+        auth.sf_access_token
+      );
+      ssotMappingProbe = { status: resp.status };
+    } catch (e) {
+      ssotMappingProbe = { error: e.name || String(e) };
+    }
+
+    res.json({
+      sf_instance_url: auth.sf_instance_url,
+      dc_instance_url: auth.dc_instance_url,
+      sf_api_version: sfVersion,
+      sf_rest_base: sfBase,
+      ssot_available: ssotAvailable,
+      ssot_mapping_probe: ssotMappingProbe,
+      sf_resource_keys: resourceKeys,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
   }
 });
 
