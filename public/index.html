@@ -517,8 +517,16 @@
     selectedFields: new Set(),
     lastSql: "",
     lastRows: [],
+    lastResultColumns: [],
     sort: { field: "", dir: "ASC" }
   };
+
+  // Map uppercase result column names back to metadata field names
+  function findMetadataFieldName(resultColName) {
+    const lower = (resultColName || "").toLowerCase();
+    const match = state.fields.find(f => f.name.toLowerCase() === lower);
+    return match ? match.name : resultColName;
+  }
 
   const el = (id) => document.getElementById(id);
 
@@ -659,6 +667,7 @@
     state.fields = (meta.entity.fields || []).slice().sort((a,b) => a.name.localeCompare(b.name));
     state.selectedFields = new Set(state.fields.map(f => f.name));
     state.sort = { field: "", dir: "ASC" };
+    state.lastResultColumns = [];
     el("customSql").value = `SELECT * FROM "${name}"`;
     setMetaHeader(meta.entity);
     renderSchema();
@@ -667,9 +676,21 @@
   }
 
   function buildOrderBy() {
-    const col = state.sort.field || (state.selectedFields.size ? Array.from(state.selectedFields)[0] : "");
-    if (!col) return "";
-    return `${col} ${state.sort.dir || "ASC"}`;
+    // Use explicitly set sort field (from clicking a column header)
+    if (state.sort.field) {
+      // Validate sort field is still in selected fields (unless using custom SQL)
+      if (!el("useCustomSql").checked && state.selectedFields.size > 0 && !state.selectedFields.has(state.sort.field)) {
+        state.sort.field = "";
+      } else {
+        return `${state.sort.field} ${state.sort.dir || "ASC"}`;
+      }
+    }
+    // Auto-fallback: use first column from last successful query results
+    if (state.lastResultColumns.length > 0) {
+      const metaName = findMetadataFieldName(state.lastResultColumns[0]);
+      if (metaName) return `${metaName} ASC`;
+    }
+    return "";
   }
 
   async function runPreview() {
@@ -689,7 +710,7 @@
       setStatus("Querying…");
       const orderby = offset > 0 ? buildOrderBy() : buildOrderBy();
       if (offset > 0 && !orderby) {
-        return alert("Offset requires order by. Select a column or choose at least one field.");
+        return alert("Pagination requires sorting. Please run a preview first (▶ Run Preview), then use Prev/Next to paginate.");
       }
 
       const payload = {
@@ -714,6 +735,7 @@
       const result = out.result || {};
       const rows = result.data || [];
       state.lastRows = rows;
+      state.lastResultColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
       el("csvBtn").disabled = rows.length === 0;
 
       el("queryMeta").textContent =
@@ -748,7 +770,7 @@
 
     el("tableWrap").querySelectorAll("th").forEach(th => {
       th.addEventListener("click", async () => {
-        const col = th.dataset.col;
+        const col = findMetadataFieldName(th.dataset.col);
         if (state.sort.field === col) {
           state.sort.dir = (state.sort.dir === "ASC") ? "DESC" : "ASC";
         } else {

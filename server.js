@@ -429,7 +429,18 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
         ? "*"
         : selected.map((f) => `"${f.replaceAll('"', '""')}"`).join(", ");
 
-    const builtSql = `SELECT ${selectClause} FROM "${dloName.replaceAll('"', '""')}"${whereClause}`;
+    // Build ORDER BY clause with quoted identifier (only for auto-built SQL)
+    let orderByClause = "";
+    if (order) {
+      const parts = order.trim().split(/\s+/);
+      const colName = parts[0];
+      const dir = /^desc$/i.test(parts[1] || "") ? "DESC" : "ASC";
+      if (safeIdent(colName)) {
+        orderByClause = ` ORDER BY "${colName.replaceAll('"', '""')}" ${dir} NULLS LAST`;
+      }
+    }
+
+    const builtSql = `SELECT ${selectClause} FROM "${dloName.replaceAll('"', '""')}"${whereClause}${orderByClause}`;
     let finalSql = builtSql;
     if (typeof sql === "string" && sql.trim()) {
       const normalized = sql.trim();
@@ -446,7 +457,6 @@ app.post("/api/dlo/:name/preview", requireAuth, async (req, res) => {
     const url = new URL(`${dc_instance_url}/api/v1/query`);
     url.searchParams.set("limit", String(lim));
     url.searchParams.set("offset", String(off));
-    if (order) url.searchParams.set("orderby", order);
 
     const resp = await fetch(url, {
       method: "POST",
