@@ -276,13 +276,17 @@ async function sfGetLatestApiVersion(sfInstanceUrl, sfAccessToken) {
   });
   if (!resp.ok) throw new Error(`Failed to list SF API versions: ${resp.status} ${await resp.text()}`);
   const versions = await resp.json();
-  const best = (versions || [])
+  // versions is an array of { version: "65.0", ... } — keep the original string format
+  const sorted = (versions || [])
     .map((v) => safeStr(v.version))
     .filter(Boolean)
-    .sort((a, b) => parseFloat(b) - parseFloat(a))[0];
-  const ver = parseFloat(best || "60.0");
-  // SSOT endpoints require v61.0+; ensure minimum
-  return String(Math.max(ver, 61.0));
+    .sort((a, b) => parseFloat(b) - parseFloat(a));
+  const best = sorted[0] || "61.0";
+  // SSOT endpoints require v61.0+; docs recommend v66.0.
+  // Salesforce API versions MUST include ".0" (e.g. "66.0" not "66").
+  const version = best.includes(".") ? best : `${best}.0`;
+  if (parseFloat(version) < 66) return "66.0";
+  return version;
 }
 
 async function tryFetchJson(url, token, timeoutMs = 8000) {
