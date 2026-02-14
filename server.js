@@ -280,7 +280,9 @@ async function sfGetLatestApiVersion(sfInstanceUrl, sfAccessToken) {
     .map((v) => safeStr(v.version))
     .filter(Boolean)
     .sort((a, b) => parseFloat(b) - parseFloat(a))[0];
-  return best || "60.0";
+  const ver = parseFloat(best || "60.0");
+  // SSOT endpoints require v61.0+; ensure minimum
+  return String(Math.max(ver, 61.0));
 }
 
 async function tryFetchJson(url, token, timeoutMs = 8000) {
@@ -670,17 +672,48 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
     let mappings = [];
     let connectAvailable = true;
     let connectProbeLog = [];
+    let resolvedBase = null;
+    let resolvedToken = null;
+
     try {
       const resolved = await resolveConnectApiBase(req);
       connectProbeLog = resolved.probeLog || [];
-      const baseUrl = resolved.baseUrl;
-      const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
+      resolvedBase = resolved.baseUrl;
+      resolvedToken = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
 
-      const mappingUrlObj = new URL(`${baseUrl.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}`);
-      mappingUrlObj.searchParams.set("dloDeveloperName", dloName);
-      const mResult = await debugFetch("Connect API: mappings (dloDeveloperName=" + dloName + ")", mappingUrlObj, token);
-      if (mResult.ok && mResult.json) {
-        mappings = pickList(mResult.json);
+      // Strategy A: try fetching ALL mappings without any filter params
+      const bulkUrl = new URL(`${resolvedBase.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}`);
+      const bulkResult = await debugFetch("Connect API: all mappings (no filter)", bulkUrl, resolvedToken);
+
+      if (bulkResult.ok && bulkResult.json) {
+        mappings = pickList(bulkResult.json);
+      } else if (bulkResult.status === 400) {
+        // Strategy B: API requires dmoDeveloperName — fetch all DMOs from metadata,
+        // then query mappings per-DMO (limited to avoid excessive calls)
+        const allDmoUrl = new URL(`${auth.dc_instance_url}/api/v1/metadata`);
+        allDmoUrl.searchParams.set("entityType", "DataModelObject");
+        const allDmoResult = await debugFetch("DC Metadata: all DMOs (for per-DMO mapping lookup)", allDmoUrl, auth.dc_access_token);
+
+        if (allDmoResult.ok && allDmoResult.json) {
+          const allDmos = allDmoResult.json.metadata || [];
+          const MAX_DMO_QUERIES = 30;
+          const queried = allDmos.slice(0, MAX_DMO_QUERIES);
+          for (const dmo of queried) {
+            const perDmoUrl = new URL(`${resolvedBase.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}`);
+            perDmoUrl.searchParams.set("dmoDeveloperName", dmo.name);
+            const perDmoResult = await debugFetch(`Connect API: mappings for DMO [${dmo.name}]`, perDmoUrl, resolvedToken);
+            if (perDmoResult.ok && perDmoResult.json) {
+              const dmoMappings = pickList(perDmoResult.json);
+              mappings.push(...dmoMappings);
+            }
+          }
+          if (allDmos.length > MAX_DMO_QUERIES) {
+            rawResponses.push({
+              label: "⚠ Per-DMO query limit reached",
+              body: { totalDmos: allDmos.length, queriedDmos: MAX_DMO_QUERIES, skippedDmos: allDmos.length - MAX_DMO_QUERIES },
+            });
+          }
+        }
       } else {
         connectAvailable = false;
       }
@@ -700,23 +733,22 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
       m?.targetDataModelObjectName || m?.targetDmoName || m?.dataModelObjectName ||
       m?.targetObjectName || m?.target?.name || m?.targetEntityName || "";
 
-    // If we passed dloDeveloperName filter, the API may return only matching records.
-    // Accept all returned mappings if source matches OR if no source field is populated
-    // (meaning the API already filtered server-side).
+    // Filter mappings to those where the source DLO matches our target DLO.
+    // With Strategy A (bulk), we need to match by name.
+    // With Strategy B (per-DMO), all returned mappings should be checked.
     const matched = mappings.filter((m) => {
       const src = safeStr(getSourceDlo(m)).toLowerCase();
-      return src === dloName.toLowerCase() || src === "";
+      return src === dloName.toLowerCase();
     });
 
     // Field relationship collection (lazy-loaded)
     let fieldRels = null;
     async function ensureFieldRelsLoaded() {
       if (fieldRels) return;
+      if (!resolvedBase || !resolvedToken) { fieldRels = []; return; }
       try {
-        const resolved = await resolveConnectApiBase(req);
-        const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
-        const relUrl = `${resolved.baseUrl.replace(/\/+$/, "")}/${relCollectionPath.replace(/^\/+/, "")}`;
-        const r = await debugFetch("Connect API: field relationships", relUrl, token);
+        const relUrl = `${resolvedBase.replace(/\/+$/, "")}/${relCollectionPath.replace(/^\/+/, "")}`;
+        const r = await debugFetch("Connect API: field relationships", relUrl, resolvedToken);
         fieldRels = r.ok && r.json ? pickList(r.json) : [];
       } catch {
         fieldRels = [];
@@ -774,12 +806,10 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
         let fieldMappings = Array.isArray(m?.fieldMappings) ? m.fieldMappings : [];
 
         // If inline mappings are empty, try fetching the mapping detail
-        if (!fieldMappings.length && mappingId) {
+        if (!fieldMappings.length && mappingId && resolvedBase && resolvedToken) {
           try {
-            const resolved = await resolveConnectApiBase(req);
-            const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
-            const detUrl = `${resolved.baseUrl.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}/${encodeURIComponent(mappingId)}`;
-            const det = await debugFetch(`Connect API: mapping detail [${mappingId}]`, detUrl, token);
+            const detUrl = `${resolvedBase.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}/${encodeURIComponent(mappingId)}`;
+            const det = await debugFetch(`Connect API: mapping detail [${mappingId}]`, detUrl, resolvedToken);
             if (det.ok && det.json) {
               const fm = det.json?.fieldMappings || det.json?.fieldMapping || det.json?.mappings || det.json?.fields || [];
               fieldMappings = Array.isArray(fm) ? fm : [];
