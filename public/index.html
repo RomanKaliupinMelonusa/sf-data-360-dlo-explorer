@@ -950,8 +950,8 @@
         let fieldMapHtml = "";
         if (d.fieldMappings && d.fieldMappings.length) {
           const fmRows = d.fieldMappings.slice(0, 50).map((fm) => {
-            const src = fm?.sourceFieldName || fm?.sourceField || fm?.source?.fieldName || "—";
-            const tgt = fm?.targetFieldName || fm?.targetField || fm?.target?.fieldName || "—";
+            const src = fm?.sourceFieldDeveloperName || fm?.sourceFieldName || fm?.sourceField || fm?.source?.fieldName || "—";
+            const tgt = fm?.targetFieldDeveloperName || fm?.targetFieldName || fm?.targetField || fm?.target?.fieldName || "—";
             return `<tr><td><code>${esc(src)}</code></td><td class="lineage-arrow">→</td><td><code>${esc(tgt)}</code></td></tr>`;
           }).join("");
 

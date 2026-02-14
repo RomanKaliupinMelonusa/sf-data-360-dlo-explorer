@@ -258,6 +258,7 @@ function requireAuth(req, res, next) {
 function pickList(json) {
   if (!json) return [];
   return (
+    json.objectSourceTargetMaps ||
     json.data || json.members || json.dataModelObjectMappings ||
     json.fieldSourceTargetRelationships || json.items ||
     json.results || json.records || json.metadata || []
@@ -675,8 +676,9 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
       const baseUrl = resolved.baseUrl;
       const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
 
-      const mappingUrl = `${baseUrl.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}`;
-      const mResult = await debugFetch("Connect API: mappings", mappingUrl, token);
+      const mappingUrlObj = new URL(`${baseUrl.replace(/\/+$/, "")}/${mappingCollectionPath.replace(/^\/+/, "")}`);
+      mappingUrlObj.searchParams.set("dloDeveloperName", dloName);
+      const mResult = await debugFetch("Connect API: mappings (dloDeveloperName=" + dloName + ")", mappingUrlObj, token);
       if (mResult.ok && mResult.json) {
         mappings = pickList(mResult.json);
       } else {
@@ -690,15 +692,21 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
     // Heuristic field extractors (payload shapes vary by org)
     const getMappingId = (m) => m?.id || m?.name || m?.mappingId || m?.developerName || "";
     const getSourceDlo = (m) =>
+      m?.sourceEntityDeveloperName ||
       m?.sourceDataLakeObjectName || m?.sourceDloName || m?.dataLakeObjectName ||
       m?.sourceObjectName || m?.source?.name || m?.sourceEntityName || "";
     const getTargetDmo = (m) =>
+      m?.targetEntityDeveloperName ||
       m?.targetDataModelObjectName || m?.targetDmoName || m?.dataModelObjectName ||
       m?.targetObjectName || m?.target?.name || m?.targetEntityName || "";
 
-    const matched = mappings.filter((m) =>
-      safeStr(getSourceDlo(m)).toLowerCase() === dloName.toLowerCase()
-    );
+    // If we passed dloDeveloperName filter, the API may return only matching records.
+    // Accept all returned mappings if source matches OR if no source field is populated
+    // (meaning the API already filtered server-side).
+    const matched = mappings.filter((m) => {
+      const src = safeStr(getSourceDlo(m)).toLowerCase();
+      return src === dloName.toLowerCase() || src === "";
+    });
 
     // Field relationship collection (lazy-loaded)
     let fieldRels = null;
@@ -762,8 +770,11 @@ app.get("/api/dlo/:name/related-objects", requireAuth, async (req, res) => {
         const dmoName = getTargetDmo(m);
         if (!dmoName) continue;
 
-        let fieldMappings = [];
-        if (mappingId) {
+        // Per the API docs, fieldMappings are returned inline in the collection response
+        let fieldMappings = Array.isArray(m?.fieldMappings) ? m.fieldMappings : [];
+
+        // If inline mappings are empty, try fetching the mapping detail
+        if (!fieldMappings.length && mappingId) {
           try {
             const resolved = await resolveConnectApiBase(req);
             const token = resolved.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
