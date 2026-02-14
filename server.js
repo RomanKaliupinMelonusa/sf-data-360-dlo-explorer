@@ -281,12 +281,9 @@ async function sfGetLatestApiVersion(sfInstanceUrl, sfAccessToken) {
     .map((v) => safeStr(v.version))
     .filter(Boolean)
     .sort((a, b) => parseFloat(b) - parseFloat(a));
+  // Use the org's actual latest version. Salesforce versions MUST include ".0".
   const best = sorted[0] || "61.0";
-  // SSOT endpoints require v61.0+; docs recommend v66.0.
-  // Salesforce API versions MUST include ".0" (e.g. "66.0" not "66").
-  const version = best.includes(".") ? best : `${best}.0`;
-  if (parseFloat(version) < 66) return "66.0";
-  return version;
+  return best.includes(".") ? best : `${best}.0`;
 }
 
 async function tryFetchJson(url, token, timeoutMs = 8000) {
@@ -331,6 +328,16 @@ async function resolveConnectApiBase(req) {
   const dc = normalizeBaseUrl(auth.dc_instance_url);
   const sf = normalizeBaseUrl(auth.sf_instance_url);
 
+  // Fetch a real DMO name from metadata API so the probe uses a valid dmoDeveloperName
+  // (the SSOT endpoint requires this param — a dummy value may cause 404 instead of 200/400)
+  let probeDmoName = "";
+  try {
+    const dmoListUrl = `${dc}/api/v1/metadata?entityType=DataModelObject`;
+    const { json: dmoListJson } = await tryFetchJson(dmoListUrl, auth.dc_access_token);
+    const dmoList = dmoListJson?.metadata || [];
+    if (dmoList.length) probeDmoName = dmoList[0].name || "";
+  } catch { /* fall through — probe will still run without it */ }
+
   const candidates = [
     // SSOT namespace on SF org host (correct per Data 360 Connect REST API docs)
     { base: `${sf}/services/data/v${sfVersion}`, tokenKind: "sf" },
@@ -354,10 +361,17 @@ async function resolveConnectApiBase(req) {
   const uniquePaths = [...new Set(mappingPaths)];
 
   const probeLog = [];
+  // Log the DMO name used for probing
+  probeLog.push({ note: `Probe dmoDeveloperName: "${probeDmoName}" (from metadata API)` });
+
   for (const c of candidates) {
     const token = c.tokenKind === "dc" ? auth.dc_access_token : auth.sf_access_token;
     for (const mp of uniquePaths) {
-      const probeUrl = `${c.base}/${mp}`;
+      // Use a real DMO name so the SSOT endpoint returns 200 (with data) or 400 (bad request)
+      // instead of 404 (not found) when the param is missing or invalid
+      const probeUrl = probeDmoName
+        ? `${c.base}/${mp}?dmoDeveloperName=${encodeURIComponent(probeDmoName)}`
+        : `${c.base}/${mp}`;
       try {
         const { resp, text } = await tryFetchJson(probeUrl, token);
         // Capture body snippet for debugging (max 500 chars)
